@@ -1,6 +1,6 @@
 {
-  "source_commit": "1333d1fcdb33a124dd98acde787c9acf8f3a508a",
-  "binary_sha256": "40c1bcc8faea194b8c39ba095d113924a1b2f4dcfb90ba7e79aefb3f16af7b2a",
+  "source_commit": "fabb530c998b4b3898868c7c161c9145d3a4a38c",
+  "binary_sha256": "5917a4f2b0771364ef73a129d463540490a79cd3d7f61420289e98859b21e665",
   "collector_sha256": "ddbe5bd5cf64a9a9e165319461d45158534fc732b966049a9a52bc8e4b4a93af",
   "telemetry": "Repository fixtures only; not host data. Application ran with --dry-run.",
   "viewport": {
@@ -15,8 +15,8 @@
     "list-sources-user.json": "6d2cecf13d6505eeab31f5adca883a346f1ac31f52d0fa06b999a306a331286a"
   },
   "screenshots": {
-    "screenshot-overview.png": "1ae573179f29bbdb01c1ab190e68be0c0054548a67af418bd3267bb91ea4a97a",
-    "screenshot-metrics.png": "923926d95d5d3d74de3e37cc08930a5fc807b80a5e1d73d93260fcd965df8227",
-    "screenshot-review.png": "3f474ac99e8acdf4e674d36d15f12bab1832f2baa28ce6800acc523a834b1b27"
+    "screenshot-overview.png": "3147c1988744a3424836348f4b49bdc1e41d9b73263f46536c7f6f1425d5c30e",
+    "screenshot-metrics.png": "dde3bc105c2e79e3abb1c46e59ca811d64adabe029b6815d6d72a5642ecb15e1",
+    "screenshot-review.png": "94a66f1d1a573b8e8c04c619d23fd7642815308b281f9900f1a299b2fa453c67"
   }
 }
