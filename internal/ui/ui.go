@@ -111,9 +111,10 @@ type ui struct {
 	composePage *adw.NavigationPage
 	repo        *adw.ActionRow // shows repoName; there is no choice: reports go to the running image's repo
 	repoName    string
-	helpGroup   *adw.PreferencesGroup
-	helpBtns    *adw.WrapBox
-	askBtn      *gtk.Button // shown only when Overview reports a problem
+	reportDesc  *gtk.Label
+	reportActs  []*gtk.Widget         // disabled until the snapshot names this image's repo
+	helpGroup   *adw.PreferencesGroup // troubleshooting help; shown only when Overview reports a problem
+	sysDetails  *adw.ExpanderRow
 	title       *adw.EntryRow
 	issueRef    *adw.EntryRow
 	desc        *gtk.TextBuffer
@@ -423,57 +424,61 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	mb.SetPrimary(true)
 	header.PackEnd(&mb.Widget)
 
-	sys := group("This System")
-	for i, t := range []string{"Name", "Version", "Image", "Kernel", "Architecture", "State", "Image ref", "Tag", "Digest", "CPU", "GPU", "GNOME"} {
+	// Primary task: one call to action in open space (HIG: pill + suggested for the view's main action).
+	heading := gtk.NewLabel("Something Not Working?")
+	heading.AddCssClass("title-2")
+	heading.SetWrap(true)
+	heading.SetJustify(gtk.JustifyCenterValue)
+	u.reportDesc = gtk.NewLabel("")
+	u.reportDesc.AddCssClass("dim-label")
+	u.reportDesc.SetWrap(true)
+	u.reportDesc.SetJustify(gtk.JustifyCenterValue)
+	report := pill("Report a Problem", func() { u.openCompose(publish.NewIssue) })
+	report.AddCssClass("suggested-action")
+	report.SetHalign(gtk.AlignCenterValue)
+	report.SetMarginTop(6)
+	hero := gtk.NewBox(gtk.OrientationVerticalValue, 6)
+	hero.Append(&heading.Widget)
+	hero.Append(&u.reportDesc.Widget)
+	hero.Append(&report.Widget)
+
+	// Secondary tasks: rows that say who each one is for, so Update isn't picked by someone it will refuse.
+	existing := group("Already Reported?")
+	navRow := func(title, sub, icon, suffix string, cb func()) *adw.ActionRow {
 		r := adw.NewActionRow()
-		r.SetTitle(t)
-		r.AddCssClass("property")
-		u.sysRows[i] = r
-		sys.Add(&r.Widget)
+		r.SetTitle(title)
+		r.SetSubtitle(sub)
+		r.SetActivatable(true)
+		r.AddPrefix(&gtk.NewImageFromIconName(icon).Widget)
+		r.AddSuffix(&gtk.NewImageFromIconName(suffix).Widget)
+		r.ConnectActivated(hold(func(adw.ActionRow) { cb() }))
+		return r
+	}
+	confirm := navRow("Confirm Existing Issue", "You have the same problem as an issue someone already reported",
+		"system-users-symbolic", "go-next-symbolic", func() { u.openCompose(publish.Confirm) })
+	update := navRow("Update Your Issue", "Add a new system report to an issue you opened",
+		"document-edit-symbolic", "go-next-symbolic", func() { u.openCompose(publish.Update) })
+	existing.Add(&confirm.Widget)
+	existing.Add(&update.Widget)
+	u.reportActs = []*gtk.Widget{&report.Widget, &confirm.Widget, &update.Widget}
+	for _, w := range u.reportActs {
+		w.SetSensitive(false) // until a snapshot tells us which repo this image reports to
 	}
 
-	hg := group("Health")
+	hg := group("System Health")
 	u.health = gtk.NewListBox()
 	u.health.SetSelectionMode(gtk.SelectionNoneValue)
 	u.health.AddCssClass("boxed-list")
 	hg.Add(&u.health.Widget)
+	u.helpGroup = adw.NewPreferencesGroup()
+	help := navRow("Get Help Fixing This", "Copies a summary of these problems and opens the assistant in Control Center",
+		"help-browser-symbolic", "adw-external-link-symbolic", u.troubleshoot) // opens another app, not a page
+	u.helpGroup.Add(&help.Widget)
+	u.helpGroup.SetVisible(false)
 
-	help := group("Get Help")
-	u.helpGroup = help
-	btns := adw.NewWrapBox() // two pills side by side, stacked when narrow; unlike GtkFlowBox, not a focus container
-	btns.SetChildSpacing(12)
-	btns.SetLineSpacing(12)
-	btns.SetHalign(gtk.AlignCenterValue)
-	btns.SetAlign(0.5)
-	report := pill("Report a Problem", func() { u.openCompose(publish.NewIssue) })
-	report.AddCssClass("suggested-action")
-	confirm := pill("Confirm Existing Issue", func() { u.openCompose(publish.Confirm) })
-	update := pill("Add to Existing Issue", func() { u.openCompose(publish.Update) })
-	same := gtk.NewSizeGroup(gtk.SizeGroupHorizontalValue) // HIG: adjacent buttons share a width
-	same.AddWidget(&report.Widget)
-	same.AddWidget(&confirm.Widget)
-	same.AddWidget(&update.Widget)
-	btns.Append(&report.Widget)
-	btns.Append(&confirm.Widget)
-	btns.Append(&update.Widget)
-	u.askBtn = pill("Troubleshoot with Goose", u.askGoose)
-	u.askBtn.SetTooltipText("Open Bluefin troubleshooting in Control Center")
-	u.askBtn.SetHalign(gtk.AlignCenterValue)
-	u.askBtn.SetVisible(false)
-	hg.Add(&u.askBtn.Widget)
-	help.Add(&btns.Widget)
-	btns.SetSensitive(false) // until a snapshot tells us which repo this image reports to
-	u.helpBtns = btns
-
-	browse := adw.NewActionRow()
-	browse.SetTitle("Browse All Metrics")
-	browse.SetActivatable(true)
-	browse.AddSuffix(&gtk.NewImageFromIconName("go-next-symbolic").Widget)
-	browse.ConnectActivated(hold(func(adw.ActionRow) { u.nav.PushByTag("metrics") }))
 	dg := adw.NewPreferencesGroup() // unfinished reports belong next to the actions that create them
 	dg.SetVisible(false)
 	u.draftsGrp = dg
-	bg := adw.NewPreferencesGroup()
 	u.draftsRow = adw.NewActionRow()
 	u.draftsRow.SetTitle("Unfinished Reports")
 	u.draftsRow.SetActivatable(true)
@@ -484,7 +489,22 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	u.draftsRow.AddSuffix(&gtk.NewImageFromIconName("go-next-symbolic").Widget)
 	u.draftsRow.SetActionName("win.drafts")
 	dg.Add(&u.draftsRow.Widget)
-	bg.Add(&browse.Widget)
+
+	// Details are for maintainers and the curious; collapsed so they don't bury the task.
+	sys := group("This System")
+	u.sysDetails = adw.NewExpanderRow()
+	u.sysDetails.SetTitle("System Details")
+	for i, t := range []string{"Name", "Version", "Image", "Kernel", "Architecture", "State", "Image ref", "Tag", "Digest", "CPU", "GPU", "GNOME"} {
+		r := adw.NewActionRow()
+		r.SetTitle(t)
+		r.AddCssClass("property")
+		u.sysRows[i] = r
+		u.sysDetails.AddRow(&r.Widget)
+	}
+	sys.Add(&u.sysDetails.Widget)
+	browse := navRow("Browse All Metrics", "Everything this report collects, searchable", "view-list-symbolic", "go-next-symbolic",
+		func() { u.nav.PushByTag("metrics") })
+	sys.Add(&browse.Widget)
 
 	u.spinner = adw.NewSpinner()
 	loading := adw.NewStatusPage()
@@ -497,8 +517,8 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 
 	u.ovStack = gtk.NewStack()
 	u.ovStack.AddNamed(&loading.Widget, "loading")
-	// Actions first so reporting never needs a scroll; the long property list goes last.
-	u.ovStack.AddNamed(scrolled(&help.Widget, &dg.Widget, &hg.Widget, &sys.Widget, &bg.Widget), "ready")
+	// Task first so reporting never needs a scroll; context follows, details last.
+	u.ovStack.AddNamed(scrolled(&hero.Widget, &dg.Widget, &existing.Widget, &hg.Widget, &u.helpGroup.Widget, &sys.Widget), "ready")
 	u.ovStack.AddNamed(&u.statusPage.Widget, "error")
 	return u.page(appName, "overview", header, &u.ovStack.Widget)
 }
@@ -553,12 +573,16 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	u.snap = &s
 	u.sum = s.Summary()
 	u.repoName = publish.Route(u.sum.ImageID)
-	u.helpBtns.SetSensitive(u.repoName != "")
-	if u.repoName == "" {
-		u.helpGroup.SetDescription("Reporting isn't available for this image (" + u.sum.ImageID + "). Only Dakota and Utah accept reports")
-	} else {
-		u.helpGroup.SetDescription("Reports go to " + u.repoName + ", the repository for the image this system runs")
+	for _, w := range u.reportActs {
+		w.SetSensitive(u.repoName != "")
 	}
+	if u.repoName == "" {
+		u.reportDesc.SetText("Reporting isn't available for this image (" + u.sum.ImageID + "). Only Dakota and Utah accept reports.")
+	} else {
+		u.reportDesc.SetText("Describe what went wrong and send it to the " + u.repoName +
+			" maintainers with a privacy-checked system report. You review everything before it's published.")
+	}
+	u.sysDetails.SetSubtitle(strings.TrimSpace(u.sum.Name + " " + u.sum.ImageVersion))
 	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState,
 		u.ident.Ref, u.ident.Tag, u.ident.Digest, u.ident.CPU, u.ident.GPU, u.ident.GNOME} {
 		if v == "" {
@@ -587,7 +611,7 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 		}
 	}
 	problem := len(u.sum.FailedUnits)+len(u.sum.Warnings) > 0
-	u.askBtn.SetVisible(problem)
+	u.helpGroup.SetVisible(problem)
 	if !problem {
 		add("No problems found", "No failed units or warnings", "object-select-symbolic")
 	}
@@ -934,7 +958,7 @@ func (u *ui) openCompose(m publish.Mode) {
 	case publish.Confirm:
 		desc, page = "What You’re Seeing (Optional)", "Confirm Existing Issue"
 	case publish.Update:
-		desc, page = "What Changed? (Optional)", "Add to Existing Issue"
+		desc, page = "What Changed? (Optional)", "Update Your Issue"
 	}
 	u.descGroup.SetTitle(desc)
 	a11yLabel(&u.descView.Widget, desc)
@@ -1591,10 +1615,10 @@ func fakeGHStream(_ context.Context, _ []byte, onLine func(string), args ...stri
 	return nil
 }
 
-// askGoose hands the problem to ChairLift's Ask Bluefin flow. ChairLift owns Goose readiness and setup.
+// troubleshoot hands the problem to ChairLift's Ask Bluefin flow, which owns the assistant's readiness and setup.
 // Unit names can embed the username or hostname, so the copied prompt carries only image and counts;
-// Goose's read-only tools inspect the live services and logs themselves.
-func (u *ui) askGoose() {
+// the assistant's read-only tools inspect the live services and logs themselves.
+func (u *ui) troubleshoot() {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Help troubleshoot this Bluefin problem from Report a Problem.\nImage: %s %s (%s)\n", u.sum.Name, u.sum.ImageVersion, u.sum.ImageID)
 	fmt.Fprintf(&b, "Failed units: %d. Report warnings: %d.\n", len(u.sum.FailedUnits), len(u.sum.Warnings))
@@ -1602,7 +1626,7 @@ func (u *ui) askGoose() {
 	u.win.GetClipboard().SetText(b.String())
 	if u.dryRun {
 		log.Print("dry-run: chairlift --ask-bluefin")
-		u.toast("Troubleshooting prompt copied")
+		u.toast("Problem summary copied")
 		return
 	}
 	go func() {
@@ -1614,11 +1638,11 @@ func (u *ui) askGoose() {
 		post(func() {
 			switch {
 			case errors.Is(err, exec.ErrNotFound):
-				u.showError("Couldn't Open Troubleshooting", "Goose troubleshooting needs Control Center (chairlift), which isn't installed")
+				u.showError("Couldn't Open Control Center", "Troubleshooting help needs Bluefin Control Center, which isn't installed")
 			case err != nil:
-				u.showError("Couldn't Open Troubleshooting", err.Error())
+				u.showError("Couldn't Open Control Center", err.Error())
 			default:
-				u.toast("Troubleshooting prompt copied. Paste it into Goose")
+				u.toast("Problem summary copied. Paste it into the assistant")
 			}
 		})
 	}()
