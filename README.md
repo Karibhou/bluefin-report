@@ -17,8 +17,6 @@ login as a gist plus an issue in the right Bluefin repository.
 brew install --cask projectbluefin/tap/bluefin-report
 ```
 
-On Bluefin, `ujust report` launches it when installed.
-
 ## Usage
 
 ```bash

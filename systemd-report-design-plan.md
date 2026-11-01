@@ -19,7 +19,7 @@ Snapshot and Review work fully offline and without a GitHub account. Sharing is 
 
 - Live monitoring, graphs, or time series. `systemd-report` metrics are counters/gauges, but this app takes snapshots; a monitoring app is a different product.
 - Uploading to arbitrary HTTP endpoints via `systemd-report upload --url=` (fleet/enterprise use; needs client certs). Possible later; not a reporting flow for end users.
-- Replacing Hive triage, issue templates, or Bonedigger's template sync. This app replaces only the **client** (`ujust report`).
+- Replacing Hive triage, issue templates, or Bonedigger's template sync. It does not change `ujust report`.
 - Running as root or shipping polkit policy.
 
 ## 2. Verified facts the design rests on
@@ -247,9 +247,9 @@ Each slice is shippable and demoable.
 | 3 | **Overview + Metrics UI** — 🟡 prototype | Driven on this host via AT-SPI in `--dry-run`: overview loads in ~150 ms (6142 system / 3425 user metrics), failed units and unreachable Journal shown, Metrics search by name works over ~9,500 rows, Ctrl+R/F5/Ctrl+F/Ctrl+Q work. **Not yet verified:** 360×294 layout, missing-binary status page live (path is a constant), Keyboard Shortcuts dialog. |
 | 4 | **Compose + Review + Export** — 🟡 prototype | Driven: Review gated on title/link, three tabs, attachment contains no hostname/username, consents gate Publish, editing issue text clears consent, Confirm has no attachment and no stale text. `privacy.Build` 40 ms, kept synchronous. **Not yet verified:** Export through the file dialog (code writes `payload.JSON` verbatim, 0600). |
 | 5 | **Publish** — 🟡 prototype | `go test -race ./internal/publish`: success, any failure → Uncertain, retry with the same report ID resumes by lookup (no duplicate gist/issue), Published re-submit is a no-op, Confirm comments only, no `--label`. Driven: dry-run publish → Done, Back goes to Overview, no second publish. **Not yet done:** Drafts list / resume after restart in the UI (Journey D across launches), real publish to a sandbox repo by a human. |
-| 6 | **Packaging + cutover** | Cask passes tap CI; `desktop-file-validate`, `appstreamcli validate` pass; `ujust report` in `projectbluefin/common` launches the app. |
+| 6 | **Packaging + cutover** | Cask passes tap CI; `desktop-file-validate`, `appstreamcli validate` pass. |
 
-Bonedigger is **not** archived: it owns issue templates and their sync. Only the `common` client script retires.
+Bonedigger and `ujust report` are unchanged.
 
 ## 11. Open decisions
 
