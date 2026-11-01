@@ -142,19 +142,26 @@ type Exec func(ctx context.Context, stdin []byte, args ...string) (stdout, stder
 type Stage string
 
 const (
-	Reviewed     Stage = "Reviewed"
-	IssuePending Stage = "IssuePending"
-	IssueCreated Stage = "IssueCreated" // issue exists; kind/area labels not yet ensured
-	LabelsDone   Stage = "LabelsDone"   // labels ensured; report not yet attached
-	GistPending  Stage = "GistPending"  // artifacts refused: fallback secret gist not yet created
-	GistCreated  Stage = "GistCreated"  // fallback gist exists; its link comment not yet posted
-	Published    Stage = "Published"
-	ShotsPending Stage = "ShotsPending" // NewIssue: report done; screenshots comment not yet confirmed
-	Uncertain    Stage = "Uncertain"
+	Reviewed       Stage = "Reviewed"
+	IssuePending   Stage = "IssuePending"
+	IssueCreated   Stage = "IssueCreated" // issue exists; kind/area labels not yet ensured
+	LabelsDone     Stage = "LabelsDone"   // labels ensured; report not yet attached
+	GistPending    Stage = "GistPending"  // artifacts refused: fallback secret gist not yet created
+	GistCreated    Stage = "GistCreated"  // fallback gist exists; its link comment not yet posted
+	Published      Stage = "Published"
+	ShotsPending   Stage = "ShotsPending"   // NewIssue: report done; screenshots comment not yet confirmed
+	CommentPending Stage = "CommentPending" // Confirm: report attached; the "same problem" comment not yet confirmed
+	Uncertain      Stage = "Uncertain"
 )
 
-// artifactName names the issue artifact holding the full report.
-const artifactName = "systemd-report.json"
+// artifactName names the issue artifact holding the full report. Confirm adds a report to someone
+// else's issue, so its name carries the report ID to stay unique per reporter.
+func artifactName(d Draft) string {
+	if d.Mode == Confirm {
+		return "systemd-report-" + d.ReportID + ".json"
+	}
+	return "systemd-report.json"
+}
 
 // Saved is the on-disk state of one draft.
 type Saved struct {
@@ -411,6 +418,10 @@ func lookup(ctx context.Context, gh Exec, s *Saved) error {
 
 func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	d := s.Draft
+	name := artifactName(d)
+	if d.Mode == Confirm && s.Stage == Reviewed { // the issue exists: go straight to attaching the report
+		s.IssueURL, s.Stage = "https://github.com/"+d.Repo+"/issues/"+d.IssueRef, LabelsDone
+	}
 	step := func(pending, done Stage, stdin []byte, args ...string) (string, error) {
 		s.Stage = pending
 		if err := save(dir, s); err != nil {
@@ -432,7 +443,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	if s.Stage == Reviewed {
 		body := d.Body
 		if d.Attachment != nil {
-			body += "\n\nFull report: `" + artifactName + "`, attached to this issue (or linked in a comment below)"
+			body += "\n\nFull report: `" + name + "`, attached to this issue (or linked in a comment below)"
 		}
 		body += "\n\n<!-- bluefin-report-id: " + s.ReportID + " -->"
 		if d.Queue != "" {
@@ -446,11 +457,6 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		}
 		args = append(args, "-f", "type=Bug", "--jq", `.html_url + " " + ([.labels[].name]|join(","))`)
 		done := IssueCreated
-		if d.Mode == Confirm {
-			args = []string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}
-			args = append(append(args, attachArgs(d.Screenshots)...), "--", d.IssueRef)
-			done = Published
-		}
 		out, err := step(IssuePending, done, []byte(body), args...)
 		if err != nil {
 			return Result{}, err
@@ -470,6 +476,9 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	final := Published
 	if len(d.Screenshots) > 0 && d.Mode == NewIssue {
 		final = ShotsPending
+	}
+	if d.Mode == Confirm {
+		final = CommentPending
 	}
 	freshShots := false // ShotsPending reached in this run: no comment can exist yet
 	if s.Stage == IssueCreated {
@@ -519,11 +528,11 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 				return warn("reading artifacts", err, errb)
 			}
 			refused = err != nil
-			exists = slices.Contains(strings.Split(strings.TrimSpace(string(out)), "\n"), artifactName)
+			exists = slices.Contains(strings.Split(strings.TrimSpace(string(out)), "\n"), name)
 		}
 		if d.Attachment != nil && !exists && !refused {
 			doc := slices.Concat([]byte("```json\n"), d.Attachment, []byte("\n```\n"))
-			if _, errb, err := gh(ctx, doc, "issue", "artifact", "create", n, "--body-file", "-", "--name", artifactName, "-R", d.Repo); err != nil {
+			if _, errb, err := gh(ctx, doc, "issue", "artifact", "create", n, "--body-file", "-", "--name", name, "-R", d.Repo); err != nil {
 				if !artifactsRefused(errb) {
 					return warn("attaching the report", err, errb)
 				}
@@ -541,7 +550,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	freshGist := false
 	if s.Stage == GistPending {
 		url, err := step(GistPending, GistCreated, d.Attachment, "gist", "create",
-			"--desc", "bluefin-report "+s.ReportID, "--filename", artifactName, "-")
+			"--desc", "bluefin-report "+s.ReportID, "--filename", name, "-")
 		if err != nil {
 			return r, fmt.Errorf("issue filed at %s, but attaching the report failed (retry to finish): %w", s.IssueURL, err)
 		}
@@ -553,7 +562,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	if s.Stage == GistCreated {
 		marker := "<!-- bluefin-report-id: " + s.ReportID + " -->"
 		posted := false
-		if !freshGist {
+		if !freshGist && d.Mode == NewIssue { // Confirm links the gist in its one comment instead
 			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
 				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
 			if err != nil {
@@ -561,7 +570,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 			}
 			posted = strings.TrimSpace(string(out)) != ""
 		}
-		if !posted {
+		if !posted && d.Mode == NewIssue {
 			if _, errb, err := gh(ctx, []byte("Full report: "+s.GistURL+"\n"+marker), "issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", n); err != nil {
 				return warn("linking the report", err, errb)
 			}
@@ -586,6 +595,36 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 			args := append([]string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}, attachArgs(d.Screenshots)...)
 			if _, errb, err := gh(ctx, []byte("Screenshots\n"+marker), append(args, "--", n)...); err != nil {
 				return warn("uploading screenshots", err, errb)
+			}
+		}
+		s.Stage = Published
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == CommentPending {
+		marker := "<!-- bluefin-report-id: " + s.ReportID + " -->"
+		posted := false
+		if !freshShots {
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !posted {
+			body := d.Body
+			switch {
+			case s.GistURL != "":
+				body += "\n\nFull report: " + s.GistURL
+			case d.Attachment != nil:
+				body += "\n\nFull report: `" + name + "`, attached to this issue"
+			}
+			body += "\n\n" + marker + "\n<!-- bluefin-report-confirm -->"
+			args := append([]string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}, attachArgs(d.Screenshots)...)
+			if _, errb, err := gh(ctx, []byte(body), append(args, "--", n)...); err != nil {
+				return warn("commenting", err, errb)
 			}
 		}
 		s.Stage = Published

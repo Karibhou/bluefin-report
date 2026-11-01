@@ -206,8 +206,65 @@ func TestResumeAfterCrashBeforeArtifact(t *testing.T) {
 func TestConfirm(t *testing.T) {
 	f := newFake()
 	r, err := Submit(context.Background(), f.exec, t.TempDir(), Draft{Mode: Confirm, Repo: "projectbluefin/dakota", Body: "same here", IssueRef: "#3"})
-	if err != nil || f.count("gist") != 0 || f.count("issue comment --repo projectbluefin/dakota --body-file - -- 3") != 1 || f.count(create) != 0 || r.IssueURL == "" {
+	if err != nil || f.count("gist") != 0 || f.count("issue artifact") != 0 || f.count("issue comment --repo projectbluefin/dakota --body-file - -- 3") != 1 || f.count(create) != 0 ||
+		r.IssueURL != "https://github.com/projectbluefin/dakota/issues/3" || strings.Contains(f.in("issue comment"), "Full report") {
 		t.Fatal(f.calls, r, err)
+	}
+}
+
+func TestConfirmWithReport(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := Draft{ReportID: "abc", Mode: Confirm, Repo: "projectbluefin/dakota", Body: "Same problem here.", IssueRef: "3", Attachment: []byte("{}")}
+	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil {
+		t.Fatal(err)
+	}
+	body := f.in("issue comment")
+	if f.count("issue artifact create 3 --body-file - --name systemd-report-abc.json") != 1 || f.count("issue comment") != 1 || f.count("gist") != 0 ||
+		!strings.Contains(body, "`systemd-report-abc.json`, attached to this issue") || !strings.Contains(body, "<!-- bluefin-report-id: abc -->") ||
+		!strings.Contains(body, "<!-- bluefin-report-confirm -->") {
+		t.Fatal(f.calls, body)
+	}
+	if p, _ := Pending(dir); len(p) != 0 {
+		t.Fatal(p)
+	}
+}
+
+func TestConfirmArtifactRefused(t *testing.T) {
+	f := newFake()
+	f.fail["artifact create"] = true
+	f.errs = map[string]string{"artifact create": "HTTP 403"}
+	d := Draft{ReportID: "abc", Mode: Confirm, Repo: "projectbluefin/dakota", Body: "x", IssueRef: "3", Attachment: []byte("{}")}
+	r, err := Submit(context.Background(), f.exec, t.TempDir(), d)
+	if err != nil || r.GistURL != "https://gist.github.com/abc" || f.count("gist create --desc bluefin-report abc --filename systemd-report-abc.json -") != 1 ||
+		f.count("issue comment") != 1 || !strings.Contains(f.in("issue comment"), "Full report: https://gist.github.com/abc") {
+		t.Fatal(err, r, f.calls)
+	}
+}
+
+func TestConfirmResumeAfterArtifact(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	f.fail["issue comment"] = true // crash between artifact and comment
+	d := Draft{ReportID: "abc", Mode: Confirm, Repo: "projectbluefin/dakota", Body: "x", IssueRef: "3", Attachment: []byte("{}")}
+	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+		t.Fatal("comment failure should be reported")
+	}
+	f.fail["issue comment"] = false
+	f.out["artifact list"] = "systemd-report.json\nsystemd-report-abc.json\n"
+	if _, err := Resume(context.Background(), f.exec, dir, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	// Second run started at CommentPending: no artifact listing or re-upload, the comment checked then posted once.
+	if f.count("issue artifact create") != 1 || f.count("issue comment") != 2 || f.count("api --paginate repos/projectbluefin/dakota/issues/3/comments") != 1 {
+		t.Fatal(f.calls)
+	}
+	// Crash before the artifact step finished: Resume lists by name and skips re-creating.
+	f, dir = newFake(), t.TempDir()
+	f.fail["artifact create"] = true
+	Submit(context.Background(), f.exec, dir, d)
+	f.fail["artifact create"] = false
+	f.out["artifact list"] = "systemd-report-abc.json\n"
+	if _, err := Resume(context.Background(), f.exec, dir, "abc"); err != nil || f.count("issue artifact create") != 1 || f.count("issue comment") != 1 {
+		t.Fatal(err, f.calls)
 	}
 }
 
@@ -217,9 +274,9 @@ func TestConfirmUncertainFoundComment(t *testing.T) {
 	d := Draft{Mode: Confirm, Repo: "projectbluefin/dakota", Body: "x", IssueRef: "https://github.com/projectbluefin/dakota/issues/3"}
 	Submit(context.Background(), f.exec, dir, d)
 	p, _ := Pending(dir)
-	f.out["api comments"] = "https://github.com/projectbluefin/dakota/issues/3#issuecomment-5\n"
+	f.out["api comments"] = "5\n"
 	r, err := Resume(context.Background(), f.exec, dir, p[0].ReportID)
-	if err != nil || f.count("issue comment") != 1 || !strings.HasSuffix(r.IssueURL, "-5") || f.count("api --paginate repos/projectbluefin/dakota/issues/3/comments?") != 1 {
+	if err != nil || f.count("issue comment") != 1 || !strings.HasSuffix(r.IssueURL, "/3") || f.count("api --paginate repos/projectbluefin/dakota/issues/3/comments?") != 1 {
 		t.Fatal(err, f.calls, r)
 	}
 }

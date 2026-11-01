@@ -32,6 +32,12 @@ import (
 
 const appID = "io.projectbluefin.Report"
 
+// appName is the user-visible name; data/*.desktop and metainfo repeat it.
+const appName = "Report a problem"
+
+// appIcon is the icon name used by the About dialog; data/*.desktop Icon= must match (checked by a test).
+const appIcon = "io.projectbluefin.Report"
+
 // previewBytes caps the Attachment tab; exported/published bytes are always full.
 const previewBytes = 200 << 10
 
@@ -108,6 +114,7 @@ type ui struct {
 	queue       *adw.ComboRow
 	area        *adw.ComboRow
 	newOnly     []*gtk.Widget
+	descGroup   *adw.PreferencesGroup
 	reviewBtn   *gtk.Button
 	refErr      *gtk.Label
 	shots       []string // screenshot paths chosen on Compose
@@ -181,7 +188,7 @@ func (u *ui) activate() {
 	u.win = adw.NewApplicationWindow(&u.app.Application)
 	u.win.SetDefaultSize(720, 760)
 	u.win.SetSizeRequest(360, 294)
-	u.win.SetTitle("Bluefin Report")
+	u.win.SetTitle(appName)
 
 	u.nav = adw.NewNavigationView()
 	u.nav.Add(u.buildOverview())
@@ -343,7 +350,7 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	menu := gio.NewMenu()
 	menu.Append("Drafts", "win.drafts")
 	menu.Append("Keyboard Shortcuts", "win.shortcuts")
-	menu.Append("About Bluefin Report", "win.about")
+	menu.Append("About "+appName, "win.about")
 	mb := gtk.NewMenuButton()
 	mb.SetIconName("open-menu-symbolic")
 	mb.SetTooltipText("Main Menu")
@@ -407,7 +414,7 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	u.ovStack.AddNamed(&loading.Widget, "loading")
 	u.ovStack.AddNamed(scrolled(&sys.Widget, &hg.Widget, &help.Widget, &bg.Widget), "ready")
 	u.ovStack.AddNamed(&u.statusPage.Widget, "error")
-	return u.page("Bluefin Report", "overview", header, &u.ovStack.Widget)
+	return u.page(appName, "overview", header, &u.ovStack.Widget)
 }
 
 func (u *ui) refresh() {
@@ -599,6 +606,7 @@ func (u *ui) buildCompose() {
 	g.Add(&u.refErr.Widget) // not a row: AdwPreferencesGroup places it below the list
 
 	dg := group("What happened?")
+	u.descGroup = dg
 	u.desc = gtk.NewTextBuffer(nil)
 	tv := gtk.NewTextViewWithBuffer(u.desc)
 	tv.SetWrapMode(gtk.WrapWordCharValue)
@@ -671,7 +679,7 @@ func (u *ui) buildCompose() {
 	u.reviewBtn.SetHalign(gtk.AlignCenterValue)
 	u.reviewBtn.SetSensitive(false)
 
-	u.newOnly = []*gtk.Widget{&u.title.Widget, &dg.Widget, &u.queue.Widget, &u.area.Widget, &u.attach.Widget}
+	u.newOnly = []*gtk.Widget{&u.title.Widget, &u.queue.Widget, &u.area.Widget}
 	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &og.Widget, &sg.Widget, &u.reviewBtn.Widget))
 	u.nav.Add(u.composePage)
 }
@@ -727,7 +735,12 @@ func (u *ui) openCompose(m publish.Mode) {
 		w.SetVisible(newIssue)
 	}
 	u.issueRef.SetVisible(!newIssue)
-	u.attach.SetActive(newIssue) // Confirm only comments; it never attaches
+	u.attach.SetActive(true)
+	if newIssue {
+		u.descGroup.SetTitle("What happened?")
+	} else {
+		u.descGroup.SetTitle("What you're seeing (optional)")
+	}
 	u.title.SetText("")
 	u.issueRef.SetText("")
 	u.desc.SetText("", -1)
@@ -919,10 +932,11 @@ func (u *ui) openReview() {
 
 func (u *ui) markdown() string {
 	var b strings.Builder
-	if u.mode == publish.NewIssue {
-		if d := strings.TrimSpace(bufText(u.desc)); d != "" {
-			b.WriteString(d + "\n\n")
-		}
+	if u.mode == publish.Confirm {
+		b.WriteString("Same problem here.\n\n")
+	}
+	if d := strings.TrimSpace(bufText(u.desc)); d != "" {
+		b.WriteString(d + "\n\n")
 	}
 	b.WriteString("| | |\n|---|---|\n")
 	for _, kv := range [][2]string{
@@ -1083,7 +1097,7 @@ func (u *ui) refreshDrafts() {
 
 func (u *ui) buildSignIn() {
 	u.signInDlg = adw.NewAlertDialog("Sign in to GitHub",
-		"Publishing needs a GitHub account. Your browser opens to approve Bluefin Report; your draft is kept.")
+		"Publishing needs a GitHub account. Your browser opens to approve the GitHub CLI; your draft is kept.")
 	u.signInDlg.Ref()
 	u.signInDlg.AddResponse("cancel", "Cancel")
 	u.signInDlg.AddResponse("signin", "Sign In")
@@ -1242,8 +1256,8 @@ func (u *ui) buildDone() {
 
 func (u *ui) about() {
 	a := adw.NewAboutDialog()
-	a.SetApplicationName("Bluefin Report")
-	a.SetApplicationIcon(appID)
+	a.SetApplicationName(appName)
+	a.SetApplicationIcon(appIcon)
 	a.SetDeveloperName("Project Bluefin")
 	a.SetVersion(Version)
 	a.SetWebsite("https://github.com/projectbluefin/bluefin-report")
