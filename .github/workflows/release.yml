@@ -29,10 +29,13 @@ on:
 
 permissions: {}
 
-# Serialize publication transactions without letting previews replace pending releases.
-# Never cancel a run that may already have pushed its tag or published its release.
+# Publishing runs (tags, schedule, publish=true dispatch) share one group so tag
+# allocation is serialized; GitHub keeps one pending run per group, so a newer
+# publisher may replace an older pending one but never a running one.
+# Previews (PR, merge queue, publish=false dispatch) queue per ref and never
+# share the publishing group.
 concurrency:
-  group: releases-${{ github.repository }}-${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && github.ref || 'publish' }}
+  group: releases-${{ github.repository }}-${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && !inputs.publish)) && github.ref || 'publish' }}
   cancel-in-progress: false
 
 jobs:
