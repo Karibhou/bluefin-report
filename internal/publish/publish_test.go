@@ -824,6 +824,47 @@ func TestScreenshotsResume(t *testing.T) {
 	}
 }
 
+func TestResumeRefusesDraftEditedOnDisk(t *testing.T) {
+	for _, edit := range []string{"body", "screenshot"} {
+		f, dir := newFake(), t.TempDir()
+		d := draft
+		d.ReportID = NewReportID()
+		d.Screenshots = shots(t, 1, ".gif", 10)
+		f.fail["issue comment"] = true // leave an unfinished draft
+		Submit(context.Background(), f.exec, dir, d)
+		state := filepath.Join(dir, d.ReportID, "state.json")
+		s, _ := load(state)
+		if edit == "body" {
+			s.Draft.Body += " edited"
+			b, _ := json.Marshal(s)
+			os.WriteFile(state, b, 0o600)
+		} else {
+			os.WriteFile(s.Draft.Screenshots[0], []byte("other image"), 0o600)
+		}
+		before, _ := os.ReadFile(state)
+		f = newFake()
+		if _, err := Resume(context.Background(), f.exec, dir, d.ReportID); err == nil || len(f.calls) != 0 {
+			t.Fatalf("%s: err=%v calls=%v", edit, err, f.calls)
+		}
+		if after, _ := os.ReadFile(state); !bytes.Equal(before, after) {
+			t.Fatalf("%s: edited draft was overwritten", edit)
+		}
+	}
+}
+
+func TestPendingListsReadableDraftsBesideCorruptOne(t *testing.T) {
+	dir := t.TempDir()
+	if err := save(dir, &Saved{ReportID: "good", Stage: LabelsDone, Draft: draft}); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(dir, "bad"), 0o700)
+	os.WriteFile(filepath.Join(dir, "bad", "state.json"), []byte(`{"ReportID":`), 0o600)
+	p, err := Pending(dir)
+	if err == nil || len(p) != 1 || p[0].ReportID != "good" {
+		t.Fatal(p, err)
+	}
+}
+
 func TestScreenshotsConfirm(t *testing.T) {
 	f, dir := newFake(), t.TempDir()
 	d := Draft{Mode: Confirm, Repo: "projectbluefin/dakota", Body: "b", IssueRef: "3", Screenshots: shots(t, 1, ".jpg", 10)}

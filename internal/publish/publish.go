@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -208,6 +209,9 @@ type Saved struct {
 	GistURL   string
 	IssueURL  string
 	StartedAt time.Time
+	// Digest covers the reviewed draft (screenshot bytes included); Resume refuses a draft edited on disk.
+	// Empty for drafts saved before it existed, which are trusted.
+	Digest string `json:",omitempty"`
 }
 
 var ErrNotSignedIn = errors.New("gh is not signed in; run `gh auth login`")
@@ -369,6 +373,9 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	}
 	d.Screenshots = shots
 	s = &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
+	if s.Digest, err = digest(d); err != nil {
+		return Result{}, err
+	}
 	if err := save(stateDir, s); err != nil {
 		return Result{}, err
 	}
@@ -383,6 +390,15 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 	}
 	if !slices.Contains(Repos, s.Draft.Repo) { // drafts saved under older routing
 		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", s.Draft.Repo)
+	}
+	if s.Stage != Published && s.Digest != "" {
+		got, err := digest(s.Draft)
+		if err != nil {
+			return Result{}, fmt.Errorf("report %s: saved draft is damaged: %w", reportID, err)
+		}
+		if got != s.Digest {
+			return Result{}, fmt.Errorf("report %s was changed on disk after review; it was not published. Start a new report instead", reportID)
+		}
 	}
 	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
 		return Result{}, ErrNotSignedIn
@@ -406,16 +422,40 @@ func Pending(stateDir string) ([]Saved, error) {
 		return nil, err
 	}
 	var out []Saved
+	var errs []error
 	for _, f := range files {
 		s, err := load(f)
 		if err != nil {
-			return nil, err
+			errs = append(errs, fmt.Errorf("%s: %w", filepath.Base(filepath.Dir(f)), err))
+			continue // one unreadable draft must not hide the others
 		}
 		if s.Stage != Published {
 			out = append(out, *s)
 		}
 	}
-	return out, nil
+	return out, errors.Join(errs...)
+}
+
+// digest hashes everything Review showed: the draft fields and each screenshot copy's name and bytes.
+func digest(d Draft) (string, error) {
+	shots := d.Screenshots
+	d.Screenshots = nil
+	b, err := json.Marshal(d)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%d:", len(b))
+	h.Write(b)
+	for _, p := range shots {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "%s:%d:", filepath.Base(p), len(data))
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // lookup decides from GitHub what an interrupted write actually did. It uses REST
