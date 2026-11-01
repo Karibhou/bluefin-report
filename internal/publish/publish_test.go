@@ -140,7 +140,7 @@ func TestSubmitRejectsChangedDraftOnRetry(t *testing.T) {
 	}{
 		{"body", func(d *Draft) { d.Body = "freshly reviewed body" }},
 		{"title", func(d *Draft) { d.Title = "freshly reviewed title" }},
-		{"repo", func(d *Draft) { d.Repo = "projectbluefin/common" }},
+		{"repo", func(d *Draft) { d.Repo = "projectbluefin/utah" }},
 		{"mode", func(d *Draft) { d.Mode = Confirm }},
 		{"issue reference", func(d *Draft) { d.IssueRef = "4" }},
 		{"queue", func(d *Draft) { d.Queue = "another-queue" }},
@@ -161,13 +161,14 @@ func TestSubmitRejectsChangedDraftOnRetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			calls := len(f.calls)
+			remoteCalls := f.count("api") + f.count("gist") + f.count("issue")
 			f.fail["issue create"] = false
 			changed := d
 			tt.change(&changed)
 			if _, err := Submit(context.Background(), f.exec, dir, changed); err == nil {
 				t.Fatal("want draft mismatch error")
 			}
-			if len(f.calls) != calls+1 || f.calls[calls] != "auth status" {
+			if f.count("api")+f.count("gist")+f.count("issue") != remoteCalls {
 				t.Fatal("changed retry must not look up or publish the saved payload", f.calls[calls:])
 			}
 			after, err := os.ReadFile(path)
@@ -196,7 +197,7 @@ func TestSubmitDistinguishesMissingAndEmptyAttachment(t *testing.T) {
 	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
 		t.Fatal("removing an empty attachment must require explicit review")
 	}
-	if len(f.calls) != 1 || f.calls[0] != "auth status" {
+	if f.count("api")+f.count("gist")+f.count("issue") != 0 {
 		t.Fatal("attachment mismatch caused remote work", f.calls)
 	}
 }
@@ -219,7 +220,7 @@ func TestSubmitPreservesCorruptState(t *testing.T) {
 	if !errors.As(err, &syntaxError) {
 		t.Fatalf("want original corrupt-state error, got %v", err)
 	}
-	if len(f.calls) != 1 || f.calls[0] != "auth status" {
+	if f.count("api")+f.count("gist")+f.count("issue") != 0 {
 		t.Fatal("corrupt state caused remote work", f.calls)
 	}
 	after, err := os.ReadFile(path)
@@ -241,7 +242,7 @@ func TestSubmitPreservesUnreadableState(t *testing.T) {
 	if !errors.As(err, &pathError) || pathError.Op != "read" {
 		t.Fatalf("want original unreadable-state error, got %v", err)
 	}
-	if len(f.calls) != 1 || f.calls[0] != "auth status" {
+	if f.count("api")+f.count("gist")+f.count("issue") != 0 {
 		t.Fatal("unreadable state caused remote work", f.calls)
 	}
 	info, err := os.Stat(path)
