@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -111,6 +112,7 @@ type ui struct {
 	repoName    string
 	helpGroup   *adw.PreferencesGroup
 	helpBtns    *adw.WrapBox
+	askBtn      *gtk.Button // shown only when Overview reports a problem
 	title       *adw.EntryRow
 	issueRef    *adw.EntryRow
 	desc        *gtk.TextBuffer
@@ -411,11 +413,19 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	report := pill("Report a Problem", func() { u.openCompose(publish.NewIssue) })
 	report.AddCssClass("suggested-action")
 	confirm := pill("Confirm Existing Issue", func() { u.openCompose(publish.Confirm) })
+	update := pill("Add to Existing Issue", func() { u.openCompose(publish.Update) })
 	same := gtk.NewSizeGroup(gtk.SizeGroupHorizontalValue) // HIG: adjacent buttons share a width
 	same.AddWidget(&report.Widget)
 	same.AddWidget(&confirm.Widget)
+	same.AddWidget(&update.Widget)
 	btns.Append(&report.Widget)
 	btns.Append(&confirm.Widget)
+	btns.Append(&update.Widget)
+	u.askBtn = pill("Troubleshoot with Goose", u.askGoose)
+	u.askBtn.SetTooltipText("Open Bluefin troubleshooting in Control Center")
+	u.askBtn.SetHalign(gtk.AlignCenterValue)
+	u.askBtn.SetVisible(false)
+	hg.Add(&u.askBtn.Widget)
 	help.Add(&btns.Widget)
 	btns.SetSensitive(false) // until a snapshot tells us which repo this image reports to
 	u.helpBtns = btns
@@ -540,7 +550,9 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 			add(w, "Warning", "dialog-warning-symbolic")
 		}
 	}
-	if len(u.sum.FailedUnits)+len(u.sum.Warnings) == 0 {
+	problem := len(u.sum.FailedUnits)+len(u.sum.Warnings) > 0
+	u.askBtn.SetVisible(problem)
+	if !problem {
 		add("No problems found", "No failed units or warnings", "object-select-symbolic")
 	}
 
@@ -840,7 +852,7 @@ func (u *ui) syncReview() {
 	}
 	ok := strings.TrimSpace(u.title.GetText()) != ""
 	msg := ""
-	if u.mode == publish.Confirm {
+	if u.mode != publish.NewIssue {
 		ref := strings.TrimSpace(u.issueRef.GetText())
 		_, err := publish.ParseIssueRef(u.repoName, ref)
 		ok = err == nil
@@ -871,8 +883,11 @@ func (u *ui) openCompose(m publish.Mode) {
 	}
 	u.issueRef.SetVisible(!newIssue)
 	desc, page := "What Happened?", "New Issue"
-	if !newIssue {
+	switch m {
+	case publish.Confirm:
 		desc, page = "What You’re Seeing (Optional)", "Confirm Existing Issue"
+	case publish.Update:
+		desc, page = "What Changed? (Optional)", "Add to Existing Issue"
 	}
 	u.descGroup.SetTitle(desc)
 	a11yLabel(&u.descView.Widget, desc)
@@ -1110,8 +1125,11 @@ func (u *ui) showReview(vals map[string]string) {
 
 func (u *ui) markdown() string {
 	var b strings.Builder
-	if u.mode == publish.Confirm {
+	switch u.mode {
+	case publish.Confirm:
 		b.WriteString("Same problem here.\n\n")
+	case publish.Update:
+		b.WriteString("Updated report from the original reporter.\n\n")
 	}
 	if d := strings.TrimSpace(bufText(u.desc)); d != "" {
 		b.WriteString(d + "\n\n")
@@ -1279,6 +1297,9 @@ func (u *ui) refreshDrafts() {
 		t := s.Draft.Title
 		if t == "" {
 			t = "Comment on #" + s.Draft.IssueRef
+			if s.Draft.Mode == publish.Update {
+				t = "Update on #" + s.Draft.IssueRef
+			}
 		}
 		r.SetTitle(t)
 		r.SetSubtitle(s.Draft.Repo + " · " + stageText(s))
@@ -1448,6 +1469,8 @@ func stateDir() string {
 func fakeGH(_ context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
 	log.Printf("dry-run gh %q (stdin %d bytes)", args, len(stdin))
 	switch {
+	case len(args) > 1 && args[0] == "api" && args[1] == "user":
+		return []byte("dry-run-user\n"), nil, nil
 	case len(args) > 1 && args[0] == "api" && args[1] == "--method":
 		return []byte("https://github.com/projectbluefin/dry-run/issues/1 kind/bug\n"), nil, nil
 	case len(args) > 1 && args[0] == "issue":
@@ -1462,6 +1485,36 @@ func fakeGHStream(_ context.Context, _ []byte, onLine func(string), args ...stri
 	onLine("! First copy your one-time code: DRY0-RUN0")
 	onLine("Open this URL to continue in your web browser: https://github.com/login/device")
 	return nil
+}
+
+// askGoose hands the problem to ChairLift's Ask Bluefin flow. ChairLift owns Goose readiness and setup;
+// the copied prompt names only the image and failed units, while Goose's read-only tools inspect live logs.
+func (u *ui) askGoose() {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Help troubleshoot this Bluefin problem from Report a Problem.\nImage: %s %s (%s)\n", u.sum.Name, u.sum.ImageVersion, u.sum.ImageID)
+	for _, f := range u.sum.FailedUnits {
+		fmt.Fprintf(&b, "Failed unit: %s\n", f)
+	}
+	if n := len(u.sum.Warnings); n > 0 {
+		fmt.Fprintf(&b, "Report warnings: %d\n", n)
+	}
+	b.WriteString("Inspect the current logs and services with your read-only tools, then suggest the next step.")
+	u.win.GetClipboard().SetText(b.String())
+	if u.dryRun {
+		log.Print("dry-run: chairlift --ask-bluefin")
+		u.toast("Troubleshooting prompt copied")
+		return
+	}
+	go func() {
+		err := exec.Command("chairlift", "--ask-bluefin").Start()
+		post(func() {
+			if err != nil {
+				u.showError("Couldn't Open Troubleshooting", "Control Center is required for Goose troubleshooting: "+err.Error())
+				return
+			}
+			u.toast("Troubleshooting prompt copied. Paste it into Goose")
+		})
+	}()
 }
 
 // ---------- Done ----------

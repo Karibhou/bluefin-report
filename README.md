@@ -8,7 +8,7 @@ login as an issue in the right Bluefin repository, with the full report attached
 ## Requirements
 
 - systemd 261 or newer with `systemd-report` (Dakota ships 262, Utah 261)
-- GTK 4 and libadwaita 1 (≥ 1.6) shared libraries from your OS
+- GTK 4 and libadwaita 1 (≥ 1.8, required by Keyboard Shortcuts) shared libraries from your OS
 - [`gh`](https://cli.github.com/) — sign-in happens inside the app
 
 ## Install
@@ -28,6 +28,12 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 Browse All Metrics filters the collected snapshot as you type. Each row has a
 Copy button for its complete value, including text shortened on screen. An empty
 search result explains how to recover; an empty collection is shown separately.
+
+Add to Existing Issue posts an updated reviewed report to an issue you already
+filed, for example after rebooting, with its own artifact and comment.
+When Overview shows a problem, Troubleshoot with Goose copies a short prompt
+(image and failed units) and runs `chairlift --ask-bluefin`; Control Center opens
+Goose or walks through its setup.
 
 ## Privacy
 

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -107,7 +108,7 @@ type Snapshot struct {
 	Warnings []string
 }
 
-// ErrNotInstalled means systemd-report could not be executed.
+// ErrNotInstalled means the systemd-report executable could not be found.
 var ErrNotInstalled = errors.New("systemd-report is not installed")
 
 // Take collects both scopes. matches limits metric families (empty = everything).
@@ -137,7 +138,7 @@ func baseArgs(scope Scope) []string {
 	return []string{"--" + string(scope), "--no-pager", "--no-legend", "--json=short"}
 }
 
-// call runs one verb, records stderr lines as warnings and maps "cannot start" to ErrNotInstalled.
+// call runs one verb, records stderr lines as warnings and returns startup failures.
 // A non-zero exit is not fatal: systemd-report exits non-zero after printing a usable
 // result when caps are hit, so callers decide based on whether stdout parses.
 func call(ctx context.Context, run Exec, scope Scope, verb string, extra []string, warn *[]string) ([]byte, error) {
@@ -149,8 +150,15 @@ func call(ctx context.Context, run Exec, scope Scope, verb string, extra []strin
 		return nil, ctx.Err()
 	}
 	var ee *exec.ExitError
-	if err != nil && !errors.As(err, &ee) && (errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist)) {
-		return nil, ErrNotInstalled
+	if err != nil && !errors.As(err, &ee) {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+			return nil, ErrNotInstalled
+		}
+		var pathErr *fs.PathError
+		var execErr *exec.Error
+		if errors.As(err, &pathErr) || errors.As(err, &execErr) {
+			return nil, fmt.Errorf("%s %s: cannot start systemd-report: %w", scope, verb, err)
+		}
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(stderr)), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
@@ -165,12 +173,23 @@ func call(ctx context.Context, run Exec, scope Scope, verb string, extra []strin
 
 func generate(ctx context.Context, run Exec, scope Scope, matches []string, warn *[]string) (Report, error) {
 	out, err := call(ctx, run, scope, "generate", matches, warn)
-	if err != nil || len(bytes.TrimSpace(out)) == 0 {
+	if err != nil {
 		return Report{}, err
 	}
 	var r Report
-	if err := json.Unmarshal(out, &r); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	dec.UseNumber()
+	if err := dec.Decode(&r); err != nil {
 		*warn = append(*warn, fmt.Sprintf("%s generate: unreadable output: %v", scope, err))
+		return Report{}, nil
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
+		*warn = append(*warn, fmt.Sprintf("%s generate: unreadable output: expected a single JSON document", scope))
+		return Report{}, nil
+	}
+	if r.MediaType != "application/vnd.io.systemd.report" || r.Metrics == nil {
+		*warn = append(*warn, fmt.Sprintf("%s generate: unreadable output: invalid report envelope (expected mediaType and metrics array)", scope))
 		return Report{}, nil
 	}
 	return r, nil
