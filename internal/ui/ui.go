@@ -629,14 +629,14 @@ func (u *ui) buildCompose() {
 	og.Add(&u.area.Widget)
 
 	sg := group("Screenshots")
-	sg.SetDescription("Uploaded unchanged and public. Up to 10 files, 10 MiB each")
+	sg.SetDescription("Public. Metadata is stripped by re-encoding. PNG, JPEG or GIF; up to 10 files, 10 MiB each")
 	u.shotList = gtk.NewListBox()
 	u.shotList.SetSelectionMode(gtk.SelectionNoneValue)
 	u.shotList.AddCssClass("boxed-list")
 	u.shotList.SetVisible(false)
 	sg.Add(&u.shotList.Widget)
 	filter := gtk.NewFileFilter()
-	filter.SetName("Images and videos")
+	filter.SetName("Images")
 	for _, ext := range publish.ScreenshotExts {
 		filter.AddSuffix(ext[1:])
 	}
@@ -693,6 +693,10 @@ func (u *ui) syncShots() {
 		u.shotList.Append(&r.Widget)
 	}
 	u.shotList.SetVisible(len(u.shots) > 0)
+	if u.consentIssue != nil { // shots changed: Review consent no longer covers them
+		u.consentIssue.SetActive(false)
+		u.consentReport.SetActive(false)
+	}
 }
 
 // syncReview enables Review once the snapshot is ready and the mode's
@@ -904,7 +908,7 @@ func (u *ui) openReview() {
 	u.shotsGroup.SetVisible(len(u.shots) > 0)
 	u.consentGroup.SetDescription("")
 	if len(u.shots) > 0 {
-		u.consentGroup.SetDescription(fmt.Sprintf("%d screenshots are uploaded unchanged and become public. They are not scrubbed.", len(u.shots)))
+		u.consentGroup.SetDescription(fmt.Sprintf("%d screenshots become public. Metadata is stripped, but image content is not scrubbed.", len(u.shots)))
 	}
 	u.consentIssue.SetActive(false)
 	u.consentReport.SetActive(false)

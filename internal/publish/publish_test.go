@@ -1,8 +1,12 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"slices"
@@ -456,7 +460,14 @@ func shots(t *testing.T, n int, ext string, size int) []string {
 	var ps []string
 	for i := range n {
 		p := filepath.Join(src, strings.Repeat("s", i+1)+ext)
-		if err := os.WriteFile(p, make([]byte, size), 0o644); err != nil {
+		var b bytes.Buffer // a real image: Submit re-encodes screenshots
+		img := image.NewGray(image.Rect(0, 0, 1, 1))
+		if ext == ".jpg" {
+			jpeg.Encode(&b, img, nil)
+		} else {
+			png.Encode(&b, img)
+		}
+		if err := os.WriteFile(p, append(b.Bytes(), make([]byte, max(0, size-b.Len()))...), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		ps = append(ps, p)
@@ -496,7 +507,7 @@ func TestScreenshotsResume(t *testing.T) {
 	f, dir := newFake(), t.TempDir()
 	d := draft
 	d.ReportID = NewReportID()
-	d.Screenshots = shots(t, 1, ".webm", 10)
+	d.Screenshots = shots(t, 1, ".gif", 10)
 	f.fail["issue comment"] = true
 	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
 		t.Fatal("want warning")

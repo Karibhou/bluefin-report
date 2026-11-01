@@ -12,6 +12,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"os"
 	"os/exec"
@@ -41,7 +45,7 @@ type Draft struct {
 	Attachment []byte
 	Queue      string
 	Area       string // NewIssue only: "" or desktop, flatpak, gaming, hardware, installer, dx
-	// Screenshots are uploaded unchanged (never scrubbed). Submit copies them into the draft dir and stores those paths.
+	// Screenshots are re-encoded (metadata stripped, content not scrubbed). Submit writes them into the draft dir and stores those paths.
 	Screenshots []string
 }
 
@@ -51,8 +55,8 @@ const (
 	MaxScreenshotBytes = 10 << 20
 )
 
-// ScreenshotExts are the attachable file types.
-var ScreenshotExts = []string{".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+// ScreenshotExts are the attachable file types: those stdlib can decode and re-encode.
+var ScreenshotExts = []string{".png", ".jpg", ".jpeg", ".gif"}
 
 func checkScreenshots(paths []string) error {
 	if len(paths) > MaxScreenshots {
@@ -73,7 +77,8 @@ func checkScreenshots(paths []string) error {
 	return nil
 }
 
-// copyScreenshots copies the files into dir (0600) so a resume survives the originals moving.
+// copyScreenshots re-encodes the files into dir (0600) so no EXIF/text metadata survives
+// and a resume survives the originals moving. Undecodable files are rejected.
 func copyScreenshots(dir string, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
@@ -83,7 +88,22 @@ func copyScreenshots(dir string, paths []string) ([]string, error) {
 	}
 	var out []string
 	for i, p := range paths {
-		b, err := os.ReadFile(p)
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, err
+		}
+		img, _, err := image.Decode(f) // first frame only for GIF
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s: not a readable image: %w", filepath.Base(p), err)
+		}
+		var b bytes.Buffer
+		if ext := strings.ToLower(filepath.Ext(p)); ext == ".jpg" || ext == ".jpeg" {
+			err = jpeg.Encode(&b, img, &jpeg.Options{Quality: 92})
+		} else {
+			p = strings.TrimSuffix(p, filepath.Ext(p)) + ".png"
+			err = png.Encode(&b, img)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +111,7 @@ func copyScreenshots(dir string, paths []string) ([]string, error) {
 		if slices.Contains(out, dst) {
 			dst = filepath.Join(dir, fmt.Sprintf("%d-%s", i, filepath.Base(p)))
 		}
-		if err := os.WriteFile(dst, b, 0o600); err != nil {
+		if err := os.WriteFile(dst, b.Bytes(), 0o600); err != nil {
 			return nil, err
 		}
 		out = append(out, dst)
