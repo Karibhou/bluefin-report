@@ -122,3 +122,26 @@ func TestBuildBudgetOmitsWholeFamiliesAndStaysValid(t *testing.T) {
 		t.Error("expected error when nothing fits")
 	}
 }
+
+func TestBuildMasksVirtualInterfaces(t *testing.T) {
+	s := snapshot.Snapshot{System: snapshot.Report{Metrics: []snapshot.Metric{
+		metric("io.systemd.Network.Address", "tailscale0", "up"),
+		metric("io.systemd.Network.Address", "wg0", "up"),
+		metric("io.systemd.Network.Address", "docker0", "up"),
+		{Name: "io.systemd.Network.Link", Object: "wlp1s0", Value: str("up"), Fields: map[string]any{"peer": "veth1234abc"}},
+		metric("io.systemd.Manager.UnitActiveState", "docker0", "active"), // not a network metric
+	}}}
+	p, err := Build(s, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(p.JSON)
+	for _, name := range []string{"tailscale0", "wg0", "veth1234abc"} {
+		if strings.Contains(out, name) {
+			t.Errorf("payload still contains %q", name)
+		}
+	}
+	if !strings.Contains(out, "wlp1s0") || p.Removed["virtual interface"] != 4 {
+		t.Errorf("Removed = %v, out = %s", p.Removed, out)
+	}
+}
