@@ -16,29 +16,33 @@ import (
 	"github.com/projectbluefin/bluefin-report/internal/snapshot"
 )
 
-// MaxBytes is the default attachment budget.
-const MaxBytes = 1 << 20
+// MaxBytes is the default attachment budget: 1 MiB minus room for the ```json fence
+// publish wraps it in, so the GitHub artifact body stays under 1 MiB.
+const MaxBytes = 1<<20 - 4<<10
 
 // Options are the user's choices in Review.
 type Options struct {
-	Username    string   // login name to scrub wherever it appears
-	IncludeUser bool     // attach the user-scope report
-	KeepFiles   []string // io.systemd.Files.* families the user explicitly opted in
-	MaxBytes    int      // 0 means MaxBytes
+	Username    string            // login name to scrub wherever it appears
+	IncludeUser bool              // attach the user-scope report
+	KeepFiles   []string          // io.systemd.Files.* families the user explicitly opted in
+	MaxBytes    int               // 0 means MaxBytes
+	Extras      map[string]string // opt-in sections (extras.Sections keys); redacted like metrics
 }
 
 // Payload is what Review shows and Publish sends, byte for byte.
 type Payload struct {
 	JSON    []byte
-	Removed map[string]int // rule → number of values removed or rewritten
-	Omitted []string       // families dropped to fit the budget
+	Removed map[string]int    // rule → number of values removed or rewritten
+	Omitted []string          // families dropped to fit the budget
+	Extras  map[string]string // Options.Extras after redaction, for the issue body
 }
 
 type document struct {
-	MediaType       string           `json:"mediaType"`
-	System          snapshot.Report  `json:"system"`
-	User            *snapshot.Report `json:"user,omitempty"`
-	OmittedFamilies []string         `json:"omittedFamilies,omitempty"`
+	MediaType       string            `json:"mediaType"`
+	System          snapshot.Report   `json:"system"`
+	User            *snapshot.Report  `json:"user,omitempty"`
+	OmittedFamilies []string          `json:"omittedFamilies,omitempty"`
+	Extras          map[string]string `json:"extras,omitempty"`
 }
 
 // dropped families identify the machine and have no diagnostic value for a public report.
@@ -87,6 +91,12 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 		u := r.report(s.User, opt.KeepFiles)
 		doc.User = &u
 	}
+	if len(opt.Extras) > 0 {
+		doc.Extras = map[string]string{}
+		for k, v := range opt.Extras {
+			doc.Extras[k] = r.text(v)
+		}
+	}
 
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -106,7 +116,7 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 			return Payload{}, err
 		}
 	}
-	return Payload{JSON: out, Removed: r.removed, Omitted: doc.OmittedFamilies}, nil
+	return Payload{JSON: out, Removed: r.removed, Omitted: doc.OmittedFamilies, Extras: doc.Extras}, nil
 }
 
 type redactor struct {

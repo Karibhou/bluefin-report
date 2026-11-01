@@ -34,6 +34,13 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
   lists every removal with a count.
 - Never sent unless you opt in per entry: file contents (`io.systemd.Files.*`)
   and user-session metrics.
+- Diagnostics, each off by default and not even collected unless switched on in Compose:
+  errors from this boot (`journalctl -b0 -p err`, last 40 lines), crashes in the last
+  7 days (`coredumpctl list`), enabled GNOME extensions, installed Flatpak apps. They are
+  scrubbed like the report and attached under `extras`; errors and crashes also appear
+  collapsed in the issue text.
+- Always shown: image ref, tag and manifest digest, CPU model, GPUs (PCI IDs and driver),
+  GNOME Shell version.
 - Sent byte-for-byte as shown in Review; editing anything withdraws consent.
 - The full report is attached publicly to the issue as `systemd-report.json`
   (an issue artifact): anyone who can see the issue can read it. Only if GitHub
