@@ -12,11 +12,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +44,88 @@ type Draft struct {
 	IssueRef   string
 	Attachment []byte
 	Queue      string
+	Area       string // NewIssue only: "" or desktop, flatpak, gaming, hardware, installer, dx
+	// Screenshots are re-encoded (metadata stripped, content not scrubbed). Submit writes them into the draft dir and stores those paths.
+	Screenshots []string
+}
+
+// Screenshot limits, checked before any network call.
+const (
+	MaxScreenshots     = 10
+	MaxScreenshotBytes = 10 << 20
+)
+
+// ScreenshotExts are the attachable file types: those stdlib can decode and re-encode.
+var ScreenshotExts = []string{".png", ".jpg", ".jpeg", ".gif"}
+
+func checkScreenshots(paths []string) error {
+	if len(paths) > MaxScreenshots {
+		return fmt.Errorf("too many screenshots: %d (GitHub uploads are limited here to %d per report)", len(paths), MaxScreenshots)
+	}
+	for _, p := range paths {
+		if !slices.Contains(ScreenshotExts, strings.ToLower(filepath.Ext(p))) {
+			return fmt.Errorf("%s: not a supported screenshot type (%s)", filepath.Base(p), strings.Join(ScreenshotExts, ", "))
+		}
+		fi, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		if fi.Size() > MaxScreenshotBytes {
+			return fmt.Errorf("%s is %d MiB: each screenshot must be at most 10 MiB to upload", filepath.Base(p), fi.Size()>>20)
+		}
+	}
+	return nil
+}
+
+// copyScreenshots re-encodes the files into dir (0600) so no EXIF/text metadata survives
+// and a resume survives the originals moving. Undecodable files are rejected.
+func copyScreenshots(dir string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	var out []string
+	for i, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			return nil, err
+		}
+		img, _, err := image.Decode(f) // first frame only for GIF
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s: not a readable image: %w", filepath.Base(p), err)
+		}
+		var b bytes.Buffer
+		if ext := strings.ToLower(filepath.Ext(p)); ext == ".jpg" || ext == ".jpeg" {
+			err = jpeg.Encode(&b, img, &jpeg.Options{Quality: 92})
+		} else {
+			p = strings.TrimSuffix(p, filepath.Ext(p)) + ".png"
+			err = png.Encode(&b, img)
+		}
+		if err != nil {
+			return nil, err
+		}
+		dst := filepath.Join(dir, filepath.Base(p))
+		if slices.Contains(out, dst) {
+			dst = filepath.Join(dir, fmt.Sprintf("%d-%s", i, filepath.Base(p)))
+		}
+		if err := os.WriteFile(dst, b.Bytes(), 0o600); err != nil {
+			return nil, err
+		}
+		out = append(out, dst)
+	}
+	return out, nil
+}
+
+// attachArgs returns gh --attach flags for every screenshot.
+func attachArgs(paths []string) []string {
+	var a []string
+	for _, p := range paths {
+		a = append(a, "--attach", p)
+	}
+	return a
 }
 
 // NewReportID returns a random id that tags every write of one report.
@@ -55,13 +142,26 @@ type Exec func(ctx context.Context, stdin []byte, args ...string) (stdout, stder
 type Stage string
 
 const (
-	Reviewed     Stage = "Reviewed"
-	GistPending  Stage = "GistPending"
-	GistCreated  Stage = "GistCreated"
-	IssuePending Stage = "IssuePending"
-	Published    Stage = "Published"
-	Uncertain    Stage = "Uncertain"
+	Reviewed       Stage = "Reviewed"
+	IssuePending   Stage = "IssuePending"
+	IssueCreated   Stage = "IssueCreated" // issue exists; kind/area labels not yet ensured
+	LabelsDone     Stage = "LabelsDone"   // labels ensured; report not yet attached
+	GistPending    Stage = "GistPending"  // artifacts refused: fallback secret gist not yet created
+	GistCreated    Stage = "GistCreated"  // fallback gist exists; its link comment not yet posted
+	Published      Stage = "Published"
+	ShotsPending   Stage = "ShotsPending"   // NewIssue: report done; screenshots comment not yet confirmed
+	CommentPending Stage = "CommentPending" // Confirm: report attached; the "same problem" comment not yet confirmed
+	Uncertain      Stage = "Uncertain"
 )
+
+// artifactName names the issue artifact holding the full report. Confirm adds a report to someone
+// else's issue, so its name carries the report ID to stay unique per reporter.
+func artifactName(d Draft) string {
+	if d.Mode == Confirm {
+		return "systemd-report-" + d.ReportID + ".json"
+	}
+	return "systemd-report.json"
+}
 
 // Saved is the on-disk state of one draft.
 type Saved struct {
@@ -75,7 +175,8 @@ type Saved struct {
 
 var ErrNotSignedIn = errors.New("gh is not signed in; run `gh auth login`")
 
-var Repos = []string{"projectbluefin/bluefin", "projectbluefin/bluefin-lts", "projectbluefin/dakota", "projectbluefin/common"}
+// Repos are the image repos that accept reports. A machine reports only to the repo of the image it runs.
+var Repos = []string{"projectbluefin/dakota", "projectbluefin/utah"}
 
 func RunGH(ctx context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
@@ -155,16 +256,14 @@ func Discard(stateDir, reportID string) error {
 	return os.RemoveAll(filepath.Join(stateDir, reportID))
 }
 
+// Route returns the repo for the running image's IMAGE_ID, or "" when the image has no report repo.
 func Route(imageID string) string {
-	switch {
-	case strings.HasPrefix(imageID, "bluefin-lts"):
-		return "projectbluefin/bluefin-lts"
-	case strings.HasPrefix(imageID, "bluefin"):
-		return "projectbluefin/bluefin"
-	case strings.HasPrefix(imageID, "dakota"):
-		return "projectbluefin/dakota"
+	for _, r := range Repos {
+		if name := strings.TrimPrefix(r, "projectbluefin/"); imageID == name || strings.HasPrefix(imageID, name+"-") {
+			return r
+		}
 	}
-	return "projectbluefin/common"
+	return ""
 }
 
 // ParseIssueRef accepts only "N", "#N" or https://github.com/<repo>/issues/N[#...].
@@ -183,8 +282,11 @@ func ParseIssueRef(repo, ref string) (int, error) {
 }
 
 func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, error) {
-	if !strings.HasPrefix(d.Repo, "projectbluefin/") || strings.Count(d.Repo, "/") != 1 {
-		return Result{}, fmt.Errorf("refusing to publish to %q: not a projectbluefin repo", d.Repo)
+	if !slices.Contains(Repos, d.Repo) {
+		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", d.Repo)
+	}
+	if err := checkScreenshots(d.Screenshots); err != nil {
+		return Result{}, err
 	}
 	if d.Mode == Confirm {
 		n, err := ParseIssueRef(d.Repo, d.IssueRef)
@@ -206,6 +308,11 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 		}
 		return Resume(ctx, gh, stateDir, d.ReportID)
 	}
+	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
+	if err != nil {
+		return Result{}, err
+	}
+	d.Screenshots = shots
 	s := &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
 	if err := save(stateDir, s); err != nil {
 		return Result{}, err
@@ -219,10 +326,14 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	if !slices.Contains(Repos, s.Draft.Repo) { // drafts saved under older routing
+		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", s.Draft.Repo)
+	}
 	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
 		return Result{}, ErrNotSignedIn
 	}
-	if s.Stage == Uncertain || s.Stage == GistPending || s.Stage == IssuePending {
+	// Interrupted writes, and drafts from older versions that hold no issue yet, are resolved by lookup.
+	if s.Stage == Uncertain || s.Stage == GistPending || s.Stage != Reviewed && s.IssueURL == "" {
 		if err := lookup(ctx, gh, s); err != nil {
 			return Result{}, err
 		}
@@ -267,19 +378,19 @@ func lookup(ctx context.Context, gh Exec, s *Saved) error {
 		}
 		return strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]), nil
 	}
-	s.Stage = Reviewed
-	if s.Draft.Attachment != nil && s.GistURL == "" {
+	if s.IssueURL != "" { // the issue exists; only the fallback gist is in doubt
 		url, err := find("gists?per_page=100"+since,
 			fmt.Sprintf(`.[] | select(.description == "bluefin-report %s") | .html_url`, s.ReportID))
 		if err != nil {
 			return err
 		}
+		s.GistURL, s.Stage = url, GistCreated
 		if url == "" {
-			return nil
+			s.Stage = GistPending
 		}
-		s.GistURL = url
+		return nil
 	}
-	s.Stage = GistCreated
+	s.Stage = Reviewed
 	marker := fmt.Sprintf(`.[] | select(.body // "" | contains("bluefin-report-id: %s")) | .html_url`, s.ReportID)
 	var path string
 	if s.Draft.Mode == Confirm {
@@ -298,12 +409,19 @@ func lookup(ctx context.Context, gh Exec, s *Saved) error {
 	}
 	if url != "" {
 		s.IssueURL, s.Stage = url, Published
+		if s.Draft.Mode == NewIssue {
+			s.Stage = IssueCreated
+		}
 	}
 	return nil
 }
 
 func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	d := s.Draft
+	name := artifactName(d)
+	if d.Mode == Confirm && s.Stage == Reviewed { // the issue exists: go straight to attaching the report
+		s.IssueURL, s.Stage = "https://github.com/"+d.Repo+"/issues/"+d.IssueRef, LabelsDone
+	}
 	step := func(pending, done Stage, stdin []byte, args ...string) (string, error) {
 		s.Stage = pending
 		if err := save(dir, s); err != nil {
@@ -321,49 +439,226 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		s.Stage = done
 		return lines[len(lines)-1], nil
 	}
+	fresh, labeled := false, false // labels known only when the issue was created in this run
 	if s.Stage == Reviewed {
-		if d.Attachment != nil {
-			url, err := step(GistPending, GistCreated, d.Attachment, "gist", "create",
-				"--desc", "bluefin-report "+s.ReportID, "--filename", "systemd-report.json", "-")
-			if err != nil {
-				return Result{}, err
-			}
-			s.GistURL = url
-		}
-		s.Stage = GistCreated
-		if err := save(dir, s); err != nil {
-			return Result{}, err
-		}
-	}
-	if s.Stage == GistCreated {
 		body := d.Body
-		if s.GistURL != "" {
-			body += "\n\nReport data: " + s.GistURL
+		if d.Attachment != nil {
+			body += "\n\nFull report: `" + name + "`, attached to this issue (or linked in a comment below)"
 		}
 		body += "\n\n<!-- bluefin-report-id: " + s.ReportID + " -->"
 		if d.Queue != "" {
 			body += "\n<!-- hive-queue: " + d.Queue + " -->"
 		}
-		args := []string{"issue", "create", "--repo", d.Repo, "--title", d.Title, "--body-file", "-"}
-		if d.Mode == Confirm {
-			args = []string{"issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", d.IssueRef}
+		// REST create: labels/type are silently dropped for non-maintainers instead of failing the create.
+		args := []string{"api", "--method", "POST", "repos/" + d.Repo + "/issues", "-f", "title=" + d.Title,
+			"-F", "body=@-", "-f", "labels[]=kind/bug"}
+		if d.Area != "" {
+			args = append(args, "-f", "labels[]=area/"+d.Area)
 		}
-		url, err := step(IssuePending, Published, []byte(body), args...)
+		args = append(args, "-f", "type=Bug", "--jq", `.html_url + " " + ([.labels[].name]|join(","))`)
+		done := IssueCreated
+		out, err := step(IssuePending, done, []byte(body), args...)
 		if err != nil {
 			return Result{}, err
 		}
-		s.IssueURL = url
+		url, labels, _ := strings.Cut(out, " ")
+		s.IssueURL, fresh, labeled = url, true, hasLabels(d, strings.Split(labels, ","))
 		if err := save(dir, s); err != nil {
 			return Result{}, err
 		}
 	}
-	return Result{IssueURL: s.IssueURL, GistURL: s.GistURL}, nil
+	r := Result{IssueURL: s.IssueURL, GistURL: s.GistURL}
+	n := s.IssueURL[strings.LastIndex(s.IssueURL, "/")+1:]
+	// Issue already exists from here on: failures are warnings, and the next Resume re-checks before writing.
+	warn := func(what string, err error, errb []byte) (Result, error) {
+		return r, fmt.Errorf("issue filed at %s, but %s failed (retry to finish): %w: %s", s.IssueURL, what, err, strings.TrimSpace(string(errb)))
+	}
+	final := Published
+	if len(d.Screenshots) > 0 && d.Mode == NewIssue {
+		final = ShotsPending
+	}
+	if d.Mode == Confirm {
+		final = CommentPending
+	}
+	freshShots := false // ShotsPending reached in this run: no comment can exist yet
+	if s.Stage == IssueCreated {
+		if !fresh {
+			out, errb, err := gh(ctx, nil, "issue", "view", n, "-R", d.Repo, "--json", "labels", "--jq", "[.labels[].name]|join(\",\")")
+			if err != nil {
+				return warn("reading labels", err, errb)
+			}
+			labeled = hasLabels(d, strings.Split(strings.TrimSpace(string(out)), ","))
+		}
+		posted := false
+		if !labeled && !fresh {
+			login, errb, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+			if err != nil {
+				return warn("reading user", err, errb)
+			}
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.user.login == %q and (.body | startswith("/kind bug"))) | .id`, strings.TrimSpace(string(login))))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !labeled && !posted {
+			// Prow applies /kind and /area for any commenter.
+			cmd := "/kind bug"
+			if d.Area != "" {
+				cmd += "\n/area " + d.Area
+			}
+			if _, errb, err := gh(ctx, []byte(cmd), "issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", n); err != nil {
+				return warn("labeling", err, errb)
+			}
+		}
+		s.Stage = LabelsDone
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == LabelsDone {
+		// The full report goes on the issue as a fenced-JSON artifact. Only when GitHub or an older gh
+		// refuses artifacts outright (no permission, preview unavailable) does it fall back to a secret
+		// gist linked in a comment; transient failures leave the draft pending for Resume.
+		exists, refused := false, false
+		if d.Attachment != nil && !fresh {
+			out, errb, err := gh(ctx, nil, "issue", "artifact", "list", n, "-R", d.Repo, "--json", "name", "--jq", ".[].name")
+			if err != nil && !artifactsRefused(errb) {
+				return warn("reading artifacts", err, errb)
+			}
+			refused = err != nil
+			exists = slices.Contains(strings.Split(strings.TrimSpace(string(out)), "\n"), name)
+		}
+		if d.Attachment != nil && !exists && !refused {
+			doc := slices.Concat([]byte("```json\n"), d.Attachment, []byte("\n```\n"))
+			if _, errb, err := gh(ctx, doc, "issue", "artifact", "create", n, "--body-file", "-", "--name", name, "-R", d.Repo); err != nil {
+				if !artifactsRefused(errb) {
+					return warn("attaching the report", err, errb)
+				}
+				refused = true
+			}
+		}
+		s.Stage, freshShots = final, true
+		if refused {
+			s.Stage = GistPending
+		}
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	freshGist := false
+	if s.Stage == GistPending {
+		url, err := step(GistPending, GistCreated, d.Attachment, "gist", "create",
+			"--desc", "bluefin-report "+s.ReportID, "--filename", name, "-")
+		if err != nil {
+			return r, fmt.Errorf("issue filed at %s, but attaching the report failed (retry to finish): %w", s.IssueURL, err)
+		}
+		s.GistURL, r.GistURL, freshGist = url, url, true
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == GistCreated {
+		marker := "<!-- bluefin-report-id: " + s.ReportID + " -->"
+		posted := false
+		if !freshGist && d.Mode == NewIssue { // Confirm links the gist in its one comment instead
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !posted && d.Mode == NewIssue {
+			if _, errb, err := gh(ctx, []byte("Full report: "+s.GistURL+"\n"+marker), "issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", n); err != nil {
+				return warn("linking the report", err, errb)
+			}
+		}
+		s.Stage, freshShots = final, true
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == ShotsPending {
+		marker := "<!-- bluefin-report-screenshots: " + s.ReportID + " -->"
+		posted := false
+		if !freshShots {
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !posted {
+			args := append([]string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}, attachArgs(d.Screenshots)...)
+			if _, errb, err := gh(ctx, []byte("Screenshots\n"+marker), append(args, "--", n)...); err != nil {
+				return warn("uploading screenshots", err, errb)
+			}
+		}
+		s.Stage = Published
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == CommentPending {
+		marker := "<!-- bluefin-report-id: " + s.ReportID + " -->"
+		posted := false
+		if !freshShots {
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !posted {
+			body := d.Body
+			switch {
+			case s.GistURL != "":
+				body += "\n\nFull report: " + s.GistURL
+			case d.Attachment != nil:
+				body += "\n\nFull report: `" + name + "`, attached to this issue"
+			}
+			body += "\n\n" + marker + "\n<!-- bluefin-report-confirm -->"
+			args := append([]string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}, attachArgs(d.Screenshots)...)
+			if _, errb, err := gh(ctx, []byte(body), append(args, "--", n)...); err != nil {
+				return warn("commenting", err, errb)
+			}
+		}
+		s.Stage = Published
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	return r, nil
+}
+
+// artifactsRefused reports a permanent refusal (permission, missing preview command), as opposed to
+// a network failure worth retrying.
+func artifactsRefused(stderr []byte) bool {
+	s := string(stderr)
+	for _, m := range []string{"HTTP 401", "HTTP 403", "HTTP 404", "HTTP 410", "HTTP 422", "unknown command", "Resource not accessible", "must have"} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLabels reports whether GitHub applied every label we asked for.
+func hasLabels(d Draft, got []string) bool {
+	return slices.Contains(got, "kind/bug") && (d.Area == "" || slices.Contains(got, "area/"+d.Area))
 }
 
 func save(dir string, s *Saved) error {
 	if s.Stage == Published {
 		// Once on GitHub, the local copy of the reviewed payload has no use; keep only id and URLs.
-		s.Draft.Attachment, s.Draft.Body = nil, ""
+		s.Draft.Attachment, s.Draft.Body, s.Draft.Screenshots = nil, "", nil
+		if err := os.RemoveAll(filepath.Join(dir, s.ReportID, "screenshots")); err != nil {
+			return err
+		}
 	}
 	d := filepath.Join(dir, s.ReportID)
 	if err := os.MkdirAll(d, 0o700); err != nil {

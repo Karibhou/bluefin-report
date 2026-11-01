@@ -18,7 +18,12 @@ import (
 func main() {
 	printSummary := flag.Bool("print-summary", false, "collect a snapshot and print the overview")
 	dryRun := flag.Bool("dry-run", false, "log gh calls instead of publishing")
+	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *version {
+		fmt.Println(ui.Version)
+		return
+	}
 	if !*printSummary {
 		os.Exit(ui.Run(*dryRun))
 	}

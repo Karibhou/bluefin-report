@@ -32,10 +32,21 @@ import (
 
 const appID = "io.projectbluefin.Report"
 
+// appName is the user-visible name; data/*.desktop and metainfo repeat it.
+const appName = "Report a problem"
+
+// appIcon is the icon name used by the About dialog; data/*.desktop Icon= must match (checked by a test).
+const appIcon = "io.projectbluefin.Report"
+
 // previewBytes caps the Attachment tab; exported/published bytes are always full.
 const previewBytes = 200 << 10
 
 var queues = []string{"", "3-clanker-queue", "3-human-queue"}
+
+var areas = []string{"", "desktop", "flatpak", "gaming", "hardware", "installer", "dx"}
+
+// Version is set at release build time via -ldflags -X.
+var Version = "dev"
 
 // Main-thread dispatch. puregotk caches callbacks by function-pointer address
 // in a fixed, never-freed table, so a fresh closure per call would exhaust it;
@@ -91,29 +102,39 @@ type ui struct {
 	// compose
 	mode        publish.Mode
 	composePage *adw.NavigationPage
-	repo        *adw.ComboRow
+	repo        *adw.ActionRow // shows repoName; there is no choice: reports go to the running image's repo
+	repoName    string
+	helpGroup   *adw.PreferencesGroup
+	helpBtns    *gtk.FlowBox
 	title       *adw.EntryRow
 	issueRef    *adw.EntryRow
 	desc        *gtk.TextBuffer
 	attach      *adw.SwitchRow
 	includeUser *adw.SwitchRow
 	queue       *adw.ComboRow
+	area        *adw.ComboRow
 	newOnly     []*gtk.Widget
+	descGroup   *adw.PreferencesGroup
 	reviewBtn   *gtk.Button
 	refErr      *gtk.Label
+	shots       []string // screenshot paths chosen on Compose
+	shotList    *gtk.ListBox
+	shotDialog  *gtk.FileDialog
 
 	// review
-	payload      privacy.Payload
-	reportID     string
-	publishing   bool
-	issueText    *gtk.TextBuffer
-	settingText  bool
-	attachText   *gtk.TextBuffer
-	removed      *gtk.ListBox
-	consentIssue *adw.SwitchRow
-	consentLink  *adw.SwitchRow
-	publishBtn   *gtk.Button
-	saveDialog   *gtk.FileDialog
+	payload       privacy.Payload
+	reportID      string
+	publishing    bool
+	issueText     *gtk.TextBuffer
+	settingText   bool
+	attachText    *gtk.TextBuffer
+	removed       *gtk.ListBox
+	consentIssue  *adw.SwitchRow
+	consentReport *adw.SwitchRow
+	publishBtn    *gtk.Button
+	saveDialog    *gtk.FileDialog
+	shotsGroup    *adw.PreferencesGroup
+	consentGroup  *adw.PreferencesGroup
 
 	// done
 	donePage *adw.StatusPage
@@ -167,7 +188,7 @@ func (u *ui) activate() {
 	u.win = adw.NewApplicationWindow(&u.app.Application)
 	u.win.SetDefaultSize(720, 760)
 	u.win.SetSizeRequest(360, 294)
-	u.win.SetTitle("Bluefin Report")
+	u.win.SetTitle(appName)
 
 	u.nav = adw.NewNavigationView()
 	u.nav.Add(u.buildOverview())
@@ -236,6 +257,10 @@ func (u *ui) activate() {
 		}
 		u.discardID = id
 		u.discardDlg.Present(&u.win.Widget)
+	})
+	idAction("shot-remove", func(path string) {
+		u.shots = slices.DeleteFunc(u.shots, func(p string) bool { return p == path })
+		u.syncShots()
 	})
 	quit := gio.NewSimpleAction("quit", nil)
 	quit.ConnectActivate(hold(func(gio.SimpleAction, uintptr) { u.app.Quit() }))
@@ -329,7 +354,7 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	menu := gio.NewMenu()
 	menu.Append("Drafts", "win.drafts")
 	menu.Append("Keyboard Shortcuts", "win.shortcuts")
-	menu.Append("About Bluefin Report", "win.about")
+	menu.Append("About "+appName, "win.about")
 	mb := gtk.NewMenuButton()
 	mb.SetIconName("open-menu-symbolic")
 	mb.SetTooltipText("Main Menu")
@@ -353,6 +378,7 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	hg.Add(&u.health.Widget)
 
 	help := group("Get help")
+	u.helpGroup = help
 	btns := gtk.NewFlowBox() // two pills side by side, stacked when narrow
 	btns.SetSelectionMode(gtk.SelectionNoneValue)
 	btns.SetMaxChildrenPerLine(2)
@@ -362,6 +388,8 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	btns.Append(&pill("Report a Problem", func() { u.openCompose(publish.NewIssue) }).Widget)
 	btns.Append(&pill("Confirm Existing Issue", func() { u.openCompose(publish.Confirm) }).Widget)
 	help.Add(&btns.Widget)
+	btns.SetSensitive(false) // until a snapshot tells us which repo this image reports to
+	u.helpBtns = btns
 
 	browse := adw.NewActionRow()
 	browse.SetTitle("Browse all metrics")
@@ -390,7 +418,7 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	u.ovStack.AddNamed(&loading.Widget, "loading")
 	u.ovStack.AddNamed(scrolled(&sys.Widget, &hg.Widget, &help.Widget, &bg.Widget), "ready")
 	u.ovStack.AddNamed(&u.statusPage.Widget, "error")
-	return u.page("Bluefin Report", "overview", header, &u.ovStack.Widget)
+	return u.page(appName, "overview", header, &u.ovStack.Widget)
 }
 
 func (u *ui) refresh() {
@@ -438,6 +466,13 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	}
 	u.snap = &s
 	u.sum = s.Summary()
+	u.repoName = publish.Route(u.sum.ImageID)
+	u.helpBtns.SetSensitive(u.repoName != "")
+	if u.repoName == "" {
+		u.helpGroup.SetDescription("Reporting isn't available for this image (" + u.sum.ImageID + "). Only Dakota and Utah accept reports.")
+	} else {
+		u.helpGroup.SetDescription("Reports go to " + u.repoName + ", the repository for the image this system runs.")
+	}
 	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState} {
 		if v == "" {
 			v = "Unknown"
@@ -589,12 +624,11 @@ func (u *ui) buildMetrics() {
 
 func (u *ui) buildCompose() {
 	g := adw.NewPreferencesGroup()
-	u.repo = adw.NewComboRow()
+	u.repo = adw.NewActionRow()
 	u.repo.SetTitle("Project")
-	u.repo.SetModel(gtk.NewStringList(publish.Repos))
+	u.repo.SetSubtitleSelectable(true)
 	g.Add(&u.repo.Widget)
 	sync := hold(func(gobject.Object, uintptr) { u.syncReview() })
-	u.repo.ConnectNotify(sync) // the issue link must match the chosen repo
 
 	u.title = adw.NewEntryRow()
 	u.title.SetTitle("Title")
@@ -615,6 +649,7 @@ func (u *ui) buildCompose() {
 	g.Add(&u.refErr.Widget) // not a row: AdwPreferencesGroup places it below the list
 
 	dg := group("What happened?")
+	u.descGroup = dg
 	u.desc = gtk.NewTextBuffer(nil)
 	tv := gtk.NewTextViewWithBuffer(u.desc)
 	tv.SetWrapMode(gtk.WrapWordCharValue)
@@ -639,15 +674,80 @@ func (u *ui) buildCompose() {
 	u.queue.SetTitle("Who should look at it")
 	u.queue.SetModel(gtk.NewStringList([]string{"No preference", "Machine analysis", "Human only"}))
 	og.Add(&u.queue.Widget)
+	u.area = adw.NewComboRow()
+	u.area.SetTitle("Area")
+	u.area.SetModel(gtk.NewStringList([]string{"Not sure", "Desktop", "Flatpak apps", "Gaming", "Hardware", "Installer", "Developer tools"}))
+	og.Add(&u.area.Widget)
+
+	sg := group("Screenshots")
+	sg.SetDescription("Public. Metadata is stripped by re-encoding. PNG, JPEG or GIF; up to 10 files, 10 MiB each")
+	u.shotList = gtk.NewListBox()
+	u.shotList.SetSelectionMode(gtk.SelectionNoneValue)
+	u.shotList.AddCssClass("boxed-list")
+	u.shotList.SetVisible(false)
+	sg.Add(&u.shotList.Widget)
+	filter := gtk.NewFileFilter()
+	filter.SetName("Images")
+	for _, ext := range publish.ScreenshotExts {
+		filter.AddSuffix(ext[1:])
+	}
+	u.shotDialog = gtk.NewFileDialog()
+	u.shotDialog.SetTitle("Add Screenshots")
+	u.shotDialog.SetDefaultFilter(filter)
+	picked := hold(gio.AsyncReadyCallback(func(_, res, _ uintptr) {
+		files, err := u.shotDialog.OpenMultipleFinish(gio.SimpleAsyncResultNewFromInternalPtr(res))
+		if err != nil || files == nil {
+			return // cancelled
+		}
+		for i := range files.GetNItems() {
+			o := files.GetObject(i)
+			if p := (&gio.FileBase{Ptr: o.Ptr}).GetPath(); p != "" && !slices.Contains(u.shots, p) {
+				u.shots = append(u.shots, p)
+			}
+			o.Unref()
+		}
+		if len(u.shots) > publish.MaxScreenshots {
+			u.shots = u.shots[:publish.MaxScreenshots]
+			u.toast(fmt.Sprintf("Only %d screenshots can be attached", publish.MaxScreenshots))
+		}
+		u.syncShots()
+	}))
+	add := pill("Add Screenshots…", func() { u.shotDialog.OpenMultiple(&u.win.Window, nil, picked, 0) })
+	add.SetHalign(gtk.AlignStartValue)
+	add.SetMarginTop(12)
+	sg.Add(&add.Widget) // not a row: placed below the list
 
 	u.reviewBtn = pill("Review", u.openReview)
 	u.reviewBtn.AddCssClass("suggested-action")
 	u.reviewBtn.SetHalign(gtk.AlignCenterValue)
 	u.reviewBtn.SetSensitive(false)
 
-	u.newOnly = []*gtk.Widget{&u.title.Widget, &dg.Widget, &u.queue.Widget, &u.attach.Widget}
-	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &og.Widget, &u.reviewBtn.Widget))
+	u.newOnly = []*gtk.Widget{&u.title.Widget, &u.queue.Widget, &u.area.Widget}
+	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &og.Widget, &sg.Widget, &u.reviewBtn.Widget))
 	u.nav.Add(u.composePage)
+}
+
+// syncShots rebuilds the screenshot list; each Remove button targets win.shot-remove with its path.
+func (u *ui) syncShots() {
+	u.shotList.RemoveAll()
+	for _, p := range u.shots {
+		r := adw.NewActionRow()
+		r.SetTitle(filepath.Base(p))
+		r.SetTitleLines(1)
+		b := gtk.NewButtonFromIconName("list-remove-symbolic")
+		b.SetTooltipText("Remove")
+		b.SetValign(gtk.AlignCenterValue)
+		b.AddCssClass("flat")
+		b.SetActionName("win.shot-remove")
+		b.SetActionTargetValue(glib.NewVariantString(p))
+		r.AddSuffix(&b.Widget)
+		u.shotList.Append(&r.Widget)
+	}
+	u.shotList.SetVisible(len(u.shots) > 0)
+	if u.consentIssue != nil { // shots changed: Review consent no longer covers them
+		u.consentIssue.SetActive(false)
+		u.consentReport.SetActive(false)
+	}
 }
 
 // syncReview enables Review once the snapshot is ready and the mode's
@@ -660,7 +760,7 @@ func (u *ui) syncReview() {
 	msg := ""
 	if u.mode == publish.Confirm {
 		ref := strings.TrimSpace(u.issueRef.GetText())
-		_, err := publish.ParseIssueRef(publish.Repos[u.repo.GetSelected()], ref)
+		_, err := publish.ParseIssueRef(u.repoName, ref)
 		ok = err == nil
 		if err != nil && ref != "" {
 			msg = err.Error()
@@ -678,21 +778,23 @@ func (u *ui) openCompose(m publish.Mode) {
 		w.SetVisible(newIssue)
 	}
 	u.issueRef.SetVisible(!newIssue)
-	u.attach.SetActive(newIssue) // Confirm only comments; it never attaches
+	u.attach.SetActive(true)
+	if newIssue {
+		u.descGroup.SetTitle("What happened?")
+	} else {
+		u.descGroup.SetTitle("What you're seeing (optional)")
+	}
 	u.title.SetText("")
 	u.issueRef.SetText("")
 	u.desc.SetText("", -1)
+	u.shots = nil
+	u.syncShots()
 	if newIssue {
 		u.composePage.SetTitle("Report a Problem")
 	} else {
 		u.composePage.SetTitle("Confirm Existing Issue")
 	}
-	route := publish.Route(u.sum.ImageID)
-	for i, r := range publish.Repos {
-		if r == route {
-			u.repo.SetSelected(uint32(i))
-		}
-	}
+	u.repo.SetSubtitle(u.repoName)
 	u.syncReview()
 	u.nav.PushByTag("compose")
 }
@@ -719,7 +821,7 @@ func (u *ui) buildReview() {
 	u.issueText.ConnectChanged(hold(func(gtk.TextBuffer) {
 		if !u.settingText {
 			u.consentIssue.SetActive(false) // edited text needs fresh consent (§6.4)
-			u.consentLink.SetActive(false)
+			u.consentReport.SetActive(false)
 		}
 	}))
 	u.attachText = gtk.NewTextBuffer(nil)
@@ -742,16 +844,19 @@ func (u *ui) buildReview() {
 	sw.SetPolicy(adw.ViewSwitcherPolicyNarrowValue) // fits 360 px
 	header.SetTitleWidget(&sw.Widget)
 
-	cg := group("Consent")
+	u.shotsGroup = group("Attachments")
+	u.consentGroup = group("Consent")
+	cg := u.consentGroup
 	u.consentIssue = adw.NewSwitchRow()
 	u.consentIssue.SetTitle("I understand the issue text will be public")
-	u.consentLink = adw.NewSwitchRow()
-	u.consentLink.SetTitle("I understand anyone with the attachment link can read it")
+	u.consentReport = adw.NewSwitchRow()
+	u.consentReport.SetTitle("I understand the full report will be attached publicly to the issue")
+	u.consentReport.SetSubtitle("Anyone who can see the issue can read it")
 	sync := hold(func(gobject.Object, uintptr) { u.syncPublish() })
 	u.consentIssue.ConnectNotify(sync)
-	u.consentLink.ConnectNotify(sync)
+	u.consentReport.ConnectNotify(sync)
 	cg.Add(&u.consentIssue.Widget)
-	cg.Add(&u.consentLink.Widget)
+	cg.Add(&u.consentReport.Widget)
 
 	u.saveDialog = gtk.NewFileDialog()
 	u.saveDialog.SetTitle("Export Report")
@@ -782,7 +887,7 @@ func (u *ui) buildReview() {
 	btns.SetMarginTop(6)
 	btns.SetMarginBottom(6)
 
-	tv := u.toolbar(header, scrolled(&stack.Widget, &cg.Widget))
+	tv := u.toolbar(header, scrolled(&stack.Widget, &u.shotsGroup.Widget, &cg.Widget))
 	tv.AddBottomBar(&btns.Widget)
 	p := adw.NewNavigationPage(&tv.Widget, "Review")
 	p.SetTag("review")
@@ -793,7 +898,7 @@ func (u *ui) syncPublish() {
 	if u.publishBtn == nil {
 		return // notify fires while the page is still being built
 	}
-	ok := !u.publishing && u.consentIssue.GetActive() && (!u.attach.GetActive() || u.consentLink.GetActive())
+	ok := !u.publishing && u.consentIssue.GetActive() && (!u.attach.GetActive() || u.consentReport.GetActive())
 	u.publishBtn.SetSensitive(ok)
 	if u.discardAct != nil {
 		u.discardAct.SetEnabled(!u.publishing) // greys out every Discard button
@@ -851,20 +956,30 @@ func (u *ui) openReview() {
 	if len(p.Removed)+len(p.Omitted) == 0 {
 		row("Nothing", "No values needed scrubbing")
 	}
-
+	names := make([]string, len(u.shots))
+	for i, p := range u.shots {
+		names[i] = filepath.Base(p)
+	}
+	u.shotsGroup.SetDescription(strings.Join(names, "\n"))
+	u.shotsGroup.SetVisible(len(u.shots) > 0)
+	u.consentGroup.SetDescription("")
+	if len(u.shots) > 0 {
+		u.consentGroup.SetDescription(fmt.Sprintf("%d screenshots become public. Metadata is stripped, but image content is not scrubbed.", len(u.shots)))
+	}
 	u.consentIssue.SetActive(false)
-	u.consentLink.SetActive(false)
-	u.consentLink.SetVisible(u.attach.GetActive())
+	u.consentReport.SetActive(false)
+	u.consentReport.SetVisible(u.attach.GetActive())
 	u.syncPublish()
 	u.nav.PushByTag("review")
 }
 
 func (u *ui) markdown() string {
 	var b strings.Builder
-	if u.mode == publish.NewIssue {
-		if d := strings.TrimSpace(bufText(u.desc)); d != "" {
-			b.WriteString(d + "\n\n")
-		}
+	if u.mode == publish.Confirm {
+		b.WriteString("Same problem here.\n\n")
+	}
+	if d := strings.TrimSpace(bufText(u.desc)); d != "" {
+		b.WriteString(d + "\n\n")
 	}
 	b.WriteString("| | |\n|---|---|\n")
 	for _, kv := range [][2]string{
@@ -877,9 +992,6 @@ func (u *ui) markdown() string {
 	for _, f := range u.sum.FailedUnits {
 		fmt.Fprintf(&b, "\n- `%s`", f)
 	}
-	if u.attach.GetActive() {
-		b.WriteString("\n\nFull report attached.\n")
-	}
 	return b.String()
 }
 
@@ -890,19 +1002,21 @@ func (u *ui) publish() {
 	d := publish.Draft{
 		ReportID: u.reportID,
 		Mode:     u.mode,
-		Repo:     publish.Repos[u.repo.GetSelected()],
+		Repo:     u.repoName,
 		Body:     bufText(u.issueText),
 	}
 	if d.Mode == publish.NewIssue {
 		d.Title = strings.TrimSpace(u.title.GetText())
 		d.Queue = queues[u.queue.GetSelected()]
+		d.Area = areas[u.area.GetSelected()]
 	} else {
 		d.IssueRef = strings.TrimSpace(u.issueRef.GetText())
 	}
 	if u.attach.GetActive() {
 		d.Attachment = u.payload.JSON
 	}
-	log.Printf("ui: publishing %s to %s (mode %d, %d attachment bytes)", d.ReportID, d.Repo, d.Mode, len(d.Attachment))
+	d.Screenshots = slices.Clone(u.shots)
+	log.Printf("ui: publishing %s to %s (mode %d, %d attachment bytes, %d screenshots)", d.ReportID, d.Repo, d.Mode, len(d.Attachment), len(d.Screenshots))
 	u.run(func() { u.publish() }, func(ctx context.Context, gh publish.Exec) (publish.Result, error) {
 		return publish.Submit(ctx, gh, u.stateDir, d)
 	})
@@ -1026,7 +1140,7 @@ func (u *ui) refreshDrafts() {
 
 func (u *ui) buildSignIn() {
 	u.signInDlg = adw.NewAlertDialog("Sign in to GitHub",
-		"Publishing needs a GitHub account. Your browser opens to approve Bluefin Report; your draft is kept.")
+		"Publishing needs a GitHub account. Your browser opens to approve the GitHub CLI; your draft is kept.")
 	u.signInDlg.Ref()
 	u.signInDlg.AddResponse("cancel", "Cancel")
 	u.signInDlg.AddResponse("signin", "Sign In")
@@ -1145,8 +1259,8 @@ func stateDir() string {
 func fakeGH(_ context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
 	log.Printf("dry-run gh %q (stdin %d bytes)", args, len(stdin))
 	switch {
-	case len(args) > 1 && args[0] == "gist" && args[1] == "create":
-		return []byte("https://gist.github.com/dry-run/0000\n"), nil, nil
+	case len(args) > 1 && args[0] == "api" && args[1] == "--method":
+		return []byte("https://github.com/projectbluefin/dry-run/issues/1 kind/bug\n"), nil, nil
 	case len(args) > 1 && args[0] == "issue":
 		return []byte("https://github.com/projectbluefin/dry-run/issues/1\n"), nil, nil
 	}
@@ -1185,10 +1299,10 @@ func (u *ui) buildDone() {
 
 func (u *ui) about() {
 	a := adw.NewAboutDialog()
-	a.SetApplicationName("Bluefin Report")
-	a.SetApplicationIcon(appID)
+	a.SetApplicationName(appName)
+	a.SetApplicationIcon(appIcon)
 	a.SetDeveloperName("Project Bluefin")
-	a.SetVersion("0.1")
+	a.SetVersion(Version)
 	a.SetWebsite("https://github.com/projectbluefin/bluefin-report")
 	a.SetLicenseType(gtk.LicenseApache20Value)
 	a.Present(&u.win.Widget)

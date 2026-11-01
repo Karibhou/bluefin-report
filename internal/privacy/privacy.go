@@ -135,12 +135,13 @@ func (r *redactor) report(in snapshot.Report, keep []string) snapshot.Report {
 			r.removed["identifying metric"]++
 			continue
 		}
-		m.Object = r.text(m.Object)
+		net := strings.HasPrefix(m.Name, "io.systemd.Network.")
+		m.Object = r.text(r.virtualIf(net, m.Object))
 		if len(m.Fields) > 0 {
 			f := make(map[string]any, len(m.Fields))
 			for k, v := range m.Fields {
 				if s, ok := v.(string); ok {
-					v = r.text(s)
+					v = r.text(r.virtualIf(net, s))
 				}
 				f[k] = v
 			}
@@ -153,6 +154,17 @@ func (r *redactor) report(in snapshot.Report, keep []string) snapshot.Report {
 		out.Metrics = append(out.Metrics, m)
 	}
 	return out
+}
+
+// reVirtualIf matches VPN/container/bridge interface names, which reveal network setup.
+var reVirtualIf = regexp.MustCompile(`^(lo|tun[0-9]*|tap[0-9]*|utun[0-9]*|wg[0-9]*|tailscale[0-9]*|proton[0-9]*|nordlynx|ipsec[0-9]*|zt[a-z0-9]*|ppp[0-9]*|docker[0-9]*|veth.*|virbr[0-9]*|vnet[0-9]*|br-.*|cni[0-9]*|flannel.*|kube.*)$`)
+
+func (r *redactor) virtualIf(network bool, s string) string {
+	if !network || !reVirtualIf.MatchString(s) {
+		return s
+	}
+	r.removed["virtual interface"]++
+	return "[virtual-if]"
 }
 
 func dropped(name string) bool {
