@@ -38,6 +38,9 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 - The full report is attached publicly to the issue as `systemd-report.json`
   (an issue artifact): anyone who can see the issue can read it. Only if GitHub
   refuses artifacts does it fall back to a secret gist linked in an issue comment.
+- Screenshots (png, jpg, jpeg, webp, gif, mp4, webm; up to 10, 10 MiB each) are
+  uploaded unchanged and public: they are not scrubbed. They go in one issue comment
+  (Confirm: on the confirmation comment) and are copied into the draft until published.
 - Raw snapshots stay in memory. Drafts keep only the reviewed payload under
   `$XDG_STATE_HOME/bluefin-report/drafts/` (mode 0700/0600). Discarding a
   draft never deletes anything already on GitHub.

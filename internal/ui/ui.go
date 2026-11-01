@@ -110,6 +110,9 @@ type ui struct {
 	newOnly     []*gtk.Widget
 	reviewBtn   *gtk.Button
 	refErr      *gtk.Label
+	shots       []string // screenshot paths chosen on Compose
+	shotList    *gtk.ListBox
+	shotDialog  *gtk.FileDialog
 
 	// review
 	payload       privacy.Payload
@@ -123,6 +126,8 @@ type ui struct {
 	consentReport *adw.SwitchRow
 	publishBtn    *gtk.Button
 	saveDialog    *gtk.FileDialog
+	shotsGroup    *adw.PreferencesGroup
+	consentGroup  *adw.PreferencesGroup
 
 	// done
 	donePage *adw.StatusPage
@@ -241,6 +246,10 @@ func (u *ui) activate() {
 		}
 		u.discardID = id
 		u.discardDlg.Present(&u.win.Widget)
+	})
+	idAction("shot-remove", func(path string) {
+		u.shots = slices.DeleteFunc(u.shots, func(p string) bool { return p == path })
+		u.syncShots()
 	})
 	quit := gio.NewSimpleAction("quit", nil)
 	quit.ConnectActivate(hold(func(gio.SimpleAction, uintptr) { u.app.Quit() }))
@@ -619,14 +628,71 @@ func (u *ui) buildCompose() {
 	u.area.SetModel(gtk.NewStringList([]string{"Not sure", "Desktop", "Flatpak apps", "Gaming", "Hardware", "Installer", "Developer tools"}))
 	og.Add(&u.area.Widget)
 
+	sg := group("Screenshots")
+	sg.SetDescription("Uploaded unchanged and public. Up to 10 files, 10 MiB each")
+	u.shotList = gtk.NewListBox()
+	u.shotList.SetSelectionMode(gtk.SelectionNoneValue)
+	u.shotList.AddCssClass("boxed-list")
+	u.shotList.SetVisible(false)
+	sg.Add(&u.shotList.Widget)
+	filter := gtk.NewFileFilter()
+	filter.SetName("Images and videos")
+	for _, ext := range publish.ScreenshotExts {
+		filter.AddSuffix(ext[1:])
+	}
+	u.shotDialog = gtk.NewFileDialog()
+	u.shotDialog.SetTitle("Add Screenshots")
+	u.shotDialog.SetDefaultFilter(filter)
+	picked := hold(gio.AsyncReadyCallback(func(_, res, _ uintptr) {
+		files, err := u.shotDialog.OpenMultipleFinish(gio.SimpleAsyncResultNewFromInternalPtr(res))
+		if err != nil || files == nil {
+			return // cancelled
+		}
+		for i := range files.GetNItems() {
+			o := files.GetObject(i)
+			if p := (&gio.FileBase{Ptr: o.Ptr}).GetPath(); p != "" && !slices.Contains(u.shots, p) {
+				u.shots = append(u.shots, p)
+			}
+			o.Unref()
+		}
+		if len(u.shots) > publish.MaxScreenshots {
+			u.shots = u.shots[:publish.MaxScreenshots]
+			u.toast(fmt.Sprintf("Only %d screenshots can be attached", publish.MaxScreenshots))
+		}
+		u.syncShots()
+	}))
+	add := pill("Add Screenshots…", func() { u.shotDialog.OpenMultiple(&u.win.Window, nil, picked, 0) })
+	add.SetHalign(gtk.AlignStartValue)
+	add.SetMarginTop(12)
+	sg.Add(&add.Widget) // not a row: placed below the list
+
 	u.reviewBtn = pill("Review", u.openReview)
 	u.reviewBtn.AddCssClass("suggested-action")
 	u.reviewBtn.SetHalign(gtk.AlignCenterValue)
 	u.reviewBtn.SetSensitive(false)
 
 	u.newOnly = []*gtk.Widget{&u.title.Widget, &dg.Widget, &u.queue.Widget, &u.area.Widget, &u.attach.Widget}
-	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &og.Widget, &u.reviewBtn.Widget))
+	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &og.Widget, &sg.Widget, &u.reviewBtn.Widget))
 	u.nav.Add(u.composePage)
+}
+
+// syncShots rebuilds the screenshot list; each Remove button targets win.shot-remove with its path.
+func (u *ui) syncShots() {
+	u.shotList.RemoveAll()
+	for _, p := range u.shots {
+		r := adw.NewActionRow()
+		r.SetTitle(filepath.Base(p))
+		r.SetTitleLines(1)
+		b := gtk.NewButtonFromIconName("list-remove-symbolic")
+		b.SetTooltipText("Remove")
+		b.SetValign(gtk.AlignCenterValue)
+		b.AddCssClass("flat")
+		b.SetActionName("win.shot-remove")
+		b.SetActionTargetValue(glib.NewVariantString(p))
+		r.AddSuffix(&b.Widget)
+		u.shotList.Append(&r.Widget)
+	}
+	u.shotList.SetVisible(len(u.shots) > 0)
 }
 
 // syncReview enables Review once the snapshot is ready and the mode's
@@ -661,6 +727,8 @@ func (u *ui) openCompose(m publish.Mode) {
 	u.title.SetText("")
 	u.issueRef.SetText("")
 	u.desc.SetText("", -1)
+	u.shots = nil
+	u.syncShots()
 	if newIssue {
 		u.composePage.SetTitle("Report a Problem")
 	} else {
@@ -716,7 +784,9 @@ func (u *ui) buildReview() {
 	sw.SetPolicy(adw.ViewSwitcherPolicyNarrowValue) // fits 360 px
 	header.SetTitleWidget(&sw.Widget)
 
-	cg := group("Consent")
+	u.shotsGroup = group("Attachments")
+	u.consentGroup = group("Consent")
+	cg := u.consentGroup
 	u.consentIssue = adw.NewSwitchRow()
 	u.consentIssue.SetTitle("I understand the issue text will be public")
 	u.consentReport = adw.NewSwitchRow()
@@ -757,7 +827,7 @@ func (u *ui) buildReview() {
 	btns.SetMarginTop(6)
 	btns.SetMarginBottom(6)
 
-	tv := u.toolbar(header, scrolled(&stack.Widget, &cg.Widget))
+	tv := u.toolbar(header, scrolled(&stack.Widget, &u.shotsGroup.Widget, &cg.Widget))
 	tv.AddBottomBar(&btns.Widget)
 	p := adw.NewNavigationPage(&tv.Widget, "Review")
 	p.SetTag("review")
@@ -826,7 +896,16 @@ func (u *ui) openReview() {
 	if len(p.Removed)+len(p.Omitted) == 0 {
 		row("Nothing", "No values needed scrubbing")
 	}
-
+	names := make([]string, len(u.shots))
+	for i, p := range u.shots {
+		names[i] = filepath.Base(p)
+	}
+	u.shotsGroup.SetDescription(strings.Join(names, "\n"))
+	u.shotsGroup.SetVisible(len(u.shots) > 0)
+	u.consentGroup.SetDescription("")
+	if len(u.shots) > 0 {
+		u.consentGroup.SetDescription(fmt.Sprintf("%d screenshots are uploaded unchanged and become public. They are not scrubbed.", len(u.shots)))
+	}
 	u.consentIssue.SetActive(false)
 	u.consentReport.SetActive(false)
 	u.consentReport.SetVisible(u.attach.GetActive())
@@ -875,7 +954,8 @@ func (u *ui) publish() {
 	if u.attach.GetActive() {
 		d.Attachment = u.payload.JSON
 	}
-	log.Printf("ui: publishing %s to %s (mode %d, %d attachment bytes)", d.ReportID, d.Repo, d.Mode, len(d.Attachment))
+	d.Screenshots = slices.Clone(u.shots)
+	log.Printf("ui: publishing %s to %s (mode %d, %d attachment bytes, %d screenshots)", d.ReportID, d.Repo, d.Mode, len(d.Attachment), len(d.Screenshots))
 	u.run(func() { u.publish() }, func(ctx context.Context, gh publish.Exec) (publish.Result, error) {
 		return publish.Submit(ctx, gh, u.stateDir, d)
 	})

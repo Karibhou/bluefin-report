@@ -450,3 +450,98 @@ func TestFallbackResumeNeverDuplicates(t *testing.T) {
 		}
 	}
 }
+
+func shots(t *testing.T, n int, ext string, size int) []string {
+	src := t.TempDir()
+	var ps []string
+	for i := range n {
+		p := filepath.Join(src, strings.Repeat("s", i+1)+ext)
+		if err := os.WriteFile(p, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ps = append(ps, p)
+	}
+	return ps
+}
+
+func TestScreenshots(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID = NewReportID()
+	d.Screenshots = shots(t, 2, ".png", 10)
+	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("issue comment") != 1 {
+		t.Fatal(f.calls)
+	}
+	c := f.calls[slices.IndexFunc(f.calls, func(c string) bool { return strings.HasPrefix(c, "issue comment") })]
+	copied := filepath.Join(dir, d.ReportID, "screenshots")
+	if c != "issue comment --repo projectbluefin/dakota --body-file - --attach "+filepath.Join(copied, "s.png")+" --attach "+filepath.Join(copied, "ss.png")+" -- 7" ||
+		f.in("issue comment") != "Screenshots\n<!-- bluefin-report-screenshots: "+d.ReportID+" -->" {
+		t.Fatalf("%q %q", c, f.in("issue comment"))
+	}
+	if _, err := os.Stat(copied); !os.IsNotExist(err) {
+		t.Fatal("copied screenshots not removed when Published", err)
+	}
+
+	f = newFake()
+	d.ReportID, d.Screenshots = NewReportID(), nil
+	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil || f.count("issue comment") != 0 {
+		t.Fatal(err, f.calls)
+	}
+}
+
+func TestScreenshotsResume(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID = NewReportID()
+	d.Screenshots = shots(t, 1, ".webm", 10)
+	f.fail["issue comment"] = true
+	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+		t.Fatal("want warning")
+	}
+	s, _ := load(filepath.Join(dir, d.ReportID, "state.json"))
+	if s.Stage != ShotsPending {
+		t.Fatal(s.Stage)
+	}
+	os.Remove(d.Screenshots[0]) // originals may move; the draft copy is used
+	if fi, err := os.Stat(s.Draft.Screenshots[0]); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatal("not copied 0600", err)
+	}
+	f = newFake()
+	f.out["api comments"] = "123\n" // marker comment exists: the crashed call went through
+	if _, err := Resume(context.Background(), f.exec, dir, d.ReportID); err != nil || f.count("issue comment") != 0 || f.count("api --paginate repos/projectbluefin/dakota/issues/7/comments") != 1 {
+		t.Fatal(err, f.calls)
+	}
+	if p, _ := Pending(dir); len(p) != 0 {
+		t.Fatal(p)
+	}
+}
+
+func TestScreenshotsConfirm(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := Draft{Mode: Confirm, Repo: "projectbluefin/dakota", Body: "b", IssueRef: "3", Screenshots: shots(t, 1, ".jpg", 10)}
+	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("issue comment") != 1 || !strings.Contains(f.calls[len(f.calls)-1], "--attach ") || !strings.HasSuffix(f.calls[len(f.calls)-1], "s.jpg -- 3") ||
+		strings.Contains(f.in("issue comment"), "bluefin-report-screenshots") {
+		t.Fatal(f.calls)
+	}
+}
+
+func TestScreenshotLimits(t *testing.T) {
+	for name, ps := range map[string][]string{
+		"count": shots(t, 11, ".png", 1),
+		"size":  shots(t, 1, ".png", MaxScreenshotBytes+1),
+		"ext":   shots(t, 1, ".exe", 1),
+	} {
+		f := newFake()
+		d := draft
+		d.Screenshots = ps
+		if _, err := Submit(context.Background(), f.exec, t.TempDir(), d); err == nil || len(f.calls) != 0 {
+			t.Errorf("%s: err=%v calls=%v", name, err, f.calls)
+		}
+	}
+}

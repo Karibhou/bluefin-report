@@ -182,6 +182,7 @@ Use `gh` (Homebrew) rather than a token store of our own. Beta 1 corrections:
 - Fallback only when artifacts are refused outright (HTTP 401/403/404/410/422, or a gh without the preview command): a **secret gist** (`gh gist create`, no `--public`; not listed on the profile, readable by anyone with the link) linked in one issue comment `Full report: <gist>` carrying the report-id marker. Transient failures stay pending for Resume.
 - Labels: create the issue through REST (`gh api --method POST repos/<repo>/issues`) with `kind/bug`, the optional `area/*` the reporter picked, and issue type `Bug`. REST silently drops labels and type for reporters without push access (GraphQL would fail the whole create), so when the returned labels lack them the app posts one `/kind bug` (and `/area …`) comment, which Prow accepts from anyone. `needs-triage` → `triage/accepted` stays with maintainers. The `<!-- hive-queue: … -->` marker stays in the body.
 - Before attaching on Resume, `gh issue artifact list N --json name` is checked for `systemd-report.json`; before the fallback comment, the issue's comments are checked for the report-id marker.
+- Screenshots: Submit checks ≤ 10 files, ≤ 10 MiB each, image/video extensions before any network call, then copies them into `<draft>/screenshots/` (0600). NewIssue posts one `gh issue comment N --body-file - --attach <file>…` with body `Screenshots` + `<!-- bluefin-report-screenshots: ID -->` from stage `ShotsPending` (Resume checks comments for that marker first); Confirm passes `--attach` on the confirmation comment. Copies are deleted when Published. Screenshots are not scrubbed; the consent text says so.
 - Issue URL comes from the REST response.
 
 ### Publication is not atomic — model it
@@ -197,11 +198,13 @@ stateDiagram-v2
     IssuePending --> IssueCreated: URL recorded
     IssuePending --> Uncertain: crash or timeout
     IssueCreated --> LabelsDone: kind/area ensured
-    LabelsDone --> Published: artifact attached (or none)
+    LabelsDone --> Published: artifact attached (or none), no screenshots
+    LabelsDone --> ShotsPending: artifact attached, screenshots chosen
+    ShotsPending --> Published: screenshots comment posted
     LabelsDone --> GistPending: artifacts refused
     GistPending --> GistCreated: URL recorded
     GistPending --> Uncertain: crash or timeout
-    GistCreated --> Published: link comment posted
+    GistCreated --> Published: link comment posted (ShotsPending if screenshots)
     Uncertain --> IssueCreated: lookup finds issue
     Uncertain --> Reviewed: lookup finds no issue
     Uncertain --> GistCreated: lookup finds fallback gist

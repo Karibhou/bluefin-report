@@ -41,6 +41,71 @@ type Draft struct {
 	Attachment []byte
 	Queue      string
 	Area       string // NewIssue only: "" or desktop, flatpak, gaming, hardware, installer, dx
+	// Screenshots are uploaded unchanged (never scrubbed). Submit copies them into the draft dir and stores those paths.
+	Screenshots []string
+}
+
+// Screenshot limits, checked before any network call.
+const (
+	MaxScreenshots     = 10
+	MaxScreenshotBytes = 10 << 20
+)
+
+// ScreenshotExts are the attachable file types.
+var ScreenshotExts = []string{".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+
+func checkScreenshots(paths []string) error {
+	if len(paths) > MaxScreenshots {
+		return fmt.Errorf("too many screenshots: %d (GitHub uploads are limited here to %d per report)", len(paths), MaxScreenshots)
+	}
+	for _, p := range paths {
+		if !slices.Contains(ScreenshotExts, strings.ToLower(filepath.Ext(p))) {
+			return fmt.Errorf("%s: not a supported screenshot type (%s)", filepath.Base(p), strings.Join(ScreenshotExts, ", "))
+		}
+		fi, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		if fi.Size() > MaxScreenshotBytes {
+			return fmt.Errorf("%s is %d MiB: each screenshot must be at most 10 MiB to upload", filepath.Base(p), fi.Size()>>20)
+		}
+	}
+	return nil
+}
+
+// copyScreenshots copies the files into dir (0600) so a resume survives the originals moving.
+func copyScreenshots(dir string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	var out []string
+	for i, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		dst := filepath.Join(dir, filepath.Base(p))
+		if slices.Contains(out, dst) {
+			dst = filepath.Join(dir, fmt.Sprintf("%d-%s", i, filepath.Base(p)))
+		}
+		if err := os.WriteFile(dst, b, 0o600); err != nil {
+			return nil, err
+		}
+		out = append(out, dst)
+	}
+	return out, nil
+}
+
+// attachArgs returns gh --attach flags for every screenshot.
+func attachArgs(paths []string) []string {
+	var a []string
+	for _, p := range paths {
+		a = append(a, "--attach", p)
+	}
+	return a
 }
 
 // NewReportID returns a random id that tags every write of one report.
@@ -64,6 +129,7 @@ const (
 	GistPending  Stage = "GistPending"  // artifacts refused: fallback secret gist not yet created
 	GistCreated  Stage = "GistCreated"  // fallback gist exists; its link comment not yet posted
 	Published    Stage = "Published"
+	ShotsPending Stage = "ShotsPending" // NewIssue: report done; screenshots comment not yet confirmed
 	Uncertain    Stage = "Uncertain"
 )
 
@@ -192,6 +258,9 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	if !slices.Contains(Repos, d.Repo) {
 		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", d.Repo)
 	}
+	if err := checkScreenshots(d.Screenshots); err != nil {
+		return Result{}, err
+	}
 	if d.Mode == Confirm {
 		n, err := ParseIssueRef(d.Repo, d.IssueRef)
 		if err != nil {
@@ -212,6 +281,11 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 		}
 		return Resume(ctx, gh, stateDir, d.ReportID)
 	}
+	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
+	if err != nil {
+		return Result{}, err
+	}
+	d.Screenshots = shots
 	s := &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
 	if err := save(stateDir, s); err != nil {
 		return Result{}, err
@@ -353,7 +427,8 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		args = append(args, "-f", "type=Bug", "--jq", `.html_url + " " + ([.labels[].name]|join(","))`)
 		done := IssueCreated
 		if d.Mode == Confirm {
-			args = []string{"issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", d.IssueRef}
+			args = []string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}
+			args = append(append(args, attachArgs(d.Screenshots)...), "--", d.IssueRef)
 			done = Published
 		}
 		out, err := step(IssuePending, done, []byte(body), args...)
@@ -372,6 +447,11 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	warn := func(what string, err error, errb []byte) (Result, error) {
 		return r, fmt.Errorf("issue filed at %s, but %s failed (retry to finish): %w: %s", s.IssueURL, what, err, strings.TrimSpace(string(errb)))
 	}
+	final := Published
+	if len(d.Screenshots) > 0 && d.Mode == NewIssue {
+		final = ShotsPending
+	}
+	freshShots := false // ShotsPending reached in this run: no comment can exist yet
 	if s.Stage == IssueCreated {
 		if !fresh {
 			out, errb, err := gh(ctx, nil, "issue", "view", n, "-R", d.Repo, "--json", "labels", "--jq", "[.labels[].name]|join(\",\")")
@@ -430,7 +510,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 				refused = true
 			}
 		}
-		s.Stage = Published
+		s.Stage, freshShots = final, true
 		if refused {
 			s.Stage = GistPending
 		}
@@ -466,6 +546,28 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 				return warn("linking the report", err, errb)
 			}
 		}
+		s.Stage, freshShots = final, true
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == ShotsPending {
+		marker := "<!-- bluefin-report-screenshots: " + s.ReportID + " -->"
+		posted := false
+		if !freshShots {
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !posted {
+			args := append([]string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}, attachArgs(d.Screenshots)...)
+			if _, errb, err := gh(ctx, []byte("Screenshots\n"+marker), append(args, "--", n)...); err != nil {
+				return warn("uploading screenshots", err, errb)
+			}
+		}
 		s.Stage = Published
 		if err := save(dir, s); err != nil {
 			return r, err
@@ -494,7 +596,10 @@ func hasLabels(d Draft, got []string) bool {
 func save(dir string, s *Saved) error {
 	if s.Stage == Published {
 		// Once on GitHub, the local copy of the reviewed payload has no use; keep only id and URLs.
-		s.Draft.Attachment, s.Draft.Body = nil, ""
+		s.Draft.Attachment, s.Draft.Body, s.Draft.Screenshots = nil, "", nil
+		if err := os.RemoveAll(filepath.Join(dir, s.ReportID, "screenshots")); err != nil {
+			return err
+		}
 	}
 	d := filepath.Join(dir, s.ReportID)
 	if err := os.MkdirAll(d, 0o700); err != nil {
