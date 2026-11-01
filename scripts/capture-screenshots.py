@@ -128,7 +128,8 @@ def main():
                 )
                 frame = wait_for(lambda: next((node for node in app if node.getRole() == pyatspi.ROLE_FRAME), None),
                                  "application window", process)
-                wait_for(lambda: named(frame, "dakota-gaming"), "fixture collection", process)
+                # Identity rows sit in a collapsed expander; a fixture-only failed unit shows the collected report.
+                wait_for(lambda: named(frame, "system: rpc-statd.service"), "fixture collection", process)
                 windows = subprocess.check_output(
                     ["xdotool", "search", "--onlyvisible", "--pid", str(process.pid)], text=True,
                 ).splitlines()
@@ -149,7 +150,8 @@ def main():
                     print(f"Captured {filename}: {dimensions}", flush=True)
 
                 capture(IMAGES[0])
-                activate(named(frame, "Browse all metrics", pyatspi.ROLE_LIST_ITEM))
+                activate(wait_for(lambda: named(frame, "Browse All Metrics", pyatspi.ROLE_LIST_ITEM),
+                                  "Browse All Metrics row", process))
                 wait_for(lambda: named(frame, "Metrics"), "Metrics navigation", process)
                 wait_for(lambda: named(frame, "io.systemd.Basic.Architecture"), "populated metrics", process)
                 capture(IMAGES[1])
