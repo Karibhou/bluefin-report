@@ -204,6 +204,7 @@ func artifactName(d Draft) string {
 // Saved is the on-disk state of one draft.
 type Saved struct {
 	ReportID  string
+	Account   string // gh login authenticated before the first write; required to resume an uncertain write
 	Stage     Stage
 	Draft     Draft
 	GistURL   string
@@ -370,12 +371,23 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
 		return Result{}, ErrNotSignedIn
 	}
+	// Persist the authenticated identity before the first write so an uncertain write can later
+	// be resolved only under the account that started it; a switch to another account must not be
+	// able to look the write up as "not found" and resume it as a duplicate.
+	login, _, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+	if err != nil {
+		return Result{}, err
+	}
+	account := strings.TrimSpace(string(login))
+	if account == "" {
+		return Result{}, ErrNotSignedIn
+	}
 	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
 	if err != nil {
 		return Result{}, err
 	}
 	d.Screenshots = shots
-	s = &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
+	s = &Saved{ReportID: d.ReportID, Account: account, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
 	if s.Digest, err = digest(d); err != nil {
 		return Result{}, err
 	}
@@ -408,6 +420,19 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 	}
 	// Interrupted writes, and drafts from older versions that hold no issue yet, are resolved by lookup.
 	if s.Stage == Uncertain || s.Stage == GistPending || s.Stage != Reviewed && s.IssueURL == "" {
+		// An uncertain write was started under a specific account. If gh is now signed in as someone
+		// else, an account-scoped lookup would miss the original write and resume would duplicate it,
+		// so stop with guidance instead of performing another remote write. Drafts saved before the
+		// account was recorded (s.Account == "") cannot be bound, so fall back to the plain lookup.
+		if s.Account != "" {
+			login, _, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+			if err != nil {
+				return Result{}, err
+			}
+			if got := strings.TrimSpace(string(login)); got != s.Account {
+				return Result{}, fmt.Errorf("cannot resume report %s: it was started with gh account %q, but gh is now signed in as %q. Sign back into %q with \"gh auth login\", resume there, or discard this draft and start a new report", s.ReportID, s.Account, got, s.Account)
+			}
+		}
 		if err := lookup(ctx, gh, s); err != nil {
 			return Result{}, err
 		}
