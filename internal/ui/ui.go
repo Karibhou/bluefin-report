@@ -1195,33 +1195,39 @@ func (u *ui) showReview(vals map[string]string) {
 }
 
 func (u *ui) markdown() string {
+	return issueMarkdown(u.mode, bufText(u.desc), bufText(u.steps), u.sum, u.ident, u.payload.Extras)
+}
+
+// issueMarkdown is the issue or comment text Review pre-fills, before the
+// publisher appends its metadata. It reads no widgets, so tests can pin it.
+func issueMarkdown(mode publish.Mode, desc, steps string, sum snapshot.Summary, ident extras.Identity, details map[string]string) string {
 	var b strings.Builder
-	switch u.mode {
+	switch mode {
 	case publish.Confirm:
 		b.WriteString("Same problem here.\n\n")
 	case publish.Update:
 		b.WriteString("Updated report from the original reporter.\n\n")
 	}
-	if d := strings.TrimSpace(bufText(u.desc)); d != "" {
+	if d := strings.TrimSpace(desc); d != "" {
 		b.WriteString(d + "\n\n")
 	}
-	if s := strings.TrimSpace(bufText(u.steps)); s != "" && u.mode == publish.NewIssue {
+	if s := strings.TrimSpace(steps); s != "" && mode == publish.NewIssue {
 		b.WriteString("### Steps to reproduce\n\n" + s + "\n\n")
 	}
 	b.WriteString("| | |\n|---|---|\n")
 	for _, kv := range [][2]string{
-		{"System", u.sum.Name}, {"Version", u.sum.ImageVersion}, {"Image", u.sum.ImageID},
-		{"Kernel", u.sum.Kernel}, {"Arch", u.sum.Arch}, {"State", u.sum.SystemState},
-		{"Image ref", u.ident.Ref}, {"Tag", u.ident.Tag}, {"Digest", u.ident.Digest},
-		{"CPU", u.ident.CPU}, {"GPU", u.ident.GPU}, {"GNOME", u.ident.GNOME},
-		{"Failed units", fmt.Sprint(len(u.sum.FailedUnits))},
+		{"System", sum.Name}, {"Version", sum.ImageVersion}, {"Image", sum.ImageID},
+		{"Kernel", sum.Kernel}, {"Arch", sum.Arch}, {"State", sum.SystemState},
+		{"Image ref", ident.Ref}, {"Tag", ident.Tag}, {"Digest", ident.Digest},
+		{"CPU", ident.CPU}, {"GPU", ident.GPU}, {"GNOME", ident.GNOME},
+		{"Failed units", fmt.Sprint(len(sum.FailedUnits))},
 	} {
 		fmt.Fprintf(&b, "| %s | %s |\n", kv[0], kv[1])
 	}
-	for _, f := range u.sum.FailedUnits {
+	for _, f := range sum.FailedUnits {
 		fmt.Fprintf(&b, "\n- `%s`", f)
 	}
-	b.WriteString(extras.Markdown(u.payload.Extras))
+	b.WriteString(extras.Markdown(details))
 	return b.String()
 }
 
