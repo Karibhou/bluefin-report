@@ -179,8 +179,9 @@ Use `gh` (Homebrew) rather than a token store of our own. Beta 1 corrections:
 
 - Sign-in: run `gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key` without a TTY; read the one-time code from stderr, show it in an `AdwAlertDialog` with Copy, and open the URL with `GtkUriLauncher`. (Beta 1 said "8-character code" — it is `XXXX-XXXX`.) Verify exact non-TTY output against the pinned `gh` version before building on it.
 - Attachment: **secret gist** (default `gh gist create`, no `--public`). Anyone with the link can read it, which the consent text states plainly; it is not listed on the user's profile.
-- Triage preference: **do not pass `--label`.** Reporters usually lack triage permission on the target repo, so label writes can fail the whole create. Put `<!-- hive-queue: 3-clanker-queue -->` in the body and let Hive apply labels. Confirm marker name with the Hive owners.
-- Issue URL comes from `gh issue create` stdout.
+- Labels: create the issue through REST (`gh api --method POST repos/<repo>/issues`) with `kind/bug`, the optional `area/*` the reporter picked, and issue type `Bug`. REST silently drops labels and type for reporters without push access (GraphQL would fail the whole create), so when the returned labels lack them the app posts one `/kind bug` (and `/area …`) comment, which Prow accepts from anyone. `needs-triage` → `triage/accepted` stays with maintainers. The `<!-- hive-queue: … -->` marker stays in the body.
+- The gist is attached to the issue as a link artifact (`gh issue artifact create N <gist> --name systemd-report`, preview in gh 2.103); the `Report data:` line stays in the body as a fallback.
+- Issue URL comes from the REST response.
 
 ### Publication is not atomic — model it
 

@@ -37,6 +37,11 @@ const previewBytes = 200 << 10
 
 var queues = []string{"", "3-clanker-queue", "3-human-queue"}
 
+var areas = []string{"", "desktop", "flatpak", "gaming", "hardware", "installer", "dx"}
+
+// Version is set at release build time via -ldflags -X.
+var Version = "dev"
+
 // Main-thread dispatch. puregotk caches callbacks by function-pointer address
 // in a fixed, never-freed table, so a fresh closure per call would exhaust it;
 // every post reuses the single package-level mainCb.
@@ -101,6 +106,7 @@ type ui struct {
 	attach      *adw.SwitchRow
 	includeUser *adw.SwitchRow
 	queue       *adw.ComboRow
+	area        *adw.ComboRow
 	newOnly     []*gtk.Widget
 	reviewBtn   *gtk.Button
 	refErr      *gtk.Label
@@ -608,13 +614,17 @@ func (u *ui) buildCompose() {
 	u.queue.SetTitle("Who should look at it")
 	u.queue.SetModel(gtk.NewStringList([]string{"No preference", "Machine analysis", "Human only"}))
 	og.Add(&u.queue.Widget)
+	u.area = adw.NewComboRow()
+	u.area.SetTitle("Area")
+	u.area.SetModel(gtk.NewStringList([]string{"Not sure", "Desktop", "Flatpak apps", "Gaming", "Hardware", "Installer", "Developer tools"}))
+	og.Add(&u.area.Widget)
 
 	u.reviewBtn = pill("Review", u.openReview)
 	u.reviewBtn.AddCssClass("suggested-action")
 	u.reviewBtn.SetHalign(gtk.AlignCenterValue)
 	u.reviewBtn.SetSensitive(false)
 
-	u.newOnly = []*gtk.Widget{&u.title.Widget, &dg.Widget, &u.queue.Widget, &u.attach.Widget}
+	u.newOnly = []*gtk.Widget{&u.title.Widget, &dg.Widget, &u.queue.Widget, &u.area.Widget, &u.attach.Widget}
 	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &og.Widget, &u.reviewBtn.Widget))
 	u.nav.Add(u.composePage)
 }
@@ -860,6 +870,7 @@ func (u *ui) publish() {
 	if d.Mode == publish.NewIssue {
 		d.Title = strings.TrimSpace(u.title.GetText())
 		d.Queue = queues[u.queue.GetSelected()]
+		d.Area = areas[u.area.GetSelected()]
 	} else {
 		d.IssueRef = strings.TrimSpace(u.issueRef.GetText())
 	}
@@ -1152,7 +1163,7 @@ func (u *ui) about() {
 	a.SetApplicationName("Bluefin Report")
 	a.SetApplicationIcon(appID)
 	a.SetDeveloperName("Project Bluefin")
-	a.SetVersion("0.1")
+	a.SetVersion(Version)
 	a.SetWebsite("https://github.com/projectbluefin/bluefin-report")
 	a.SetLicenseType(gtk.LicenseApache20Value)
 	a.Present(&u.win.Widget)

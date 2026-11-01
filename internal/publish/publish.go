@@ -40,6 +40,7 @@ type Draft struct {
 	IssueRef   string
 	Attachment []byte
 	Queue      string
+	Area       string // NewIssue only: "" or desktop, flatpak, gaming, hardware, installer, dx
 }
 
 // NewReportID returns a random id that tags every write of one report.
@@ -60,6 +61,8 @@ const (
 	GistPending  Stage = "GistPending"
 	GistCreated  Stage = "GistCreated"
 	IssuePending Stage = "IssuePending"
+	IssueCreated Stage = "IssueCreated" // issue exists; kind/area labels not yet ensured
+	LabelsDone   Stage = "LabelsDone"   // labels ensured; gist artifact not yet attached
 	Published    Stage = "Published"
 	Uncertain    Stage = "Uncertain"
 )
@@ -301,6 +304,9 @@ func lookup(ctx context.Context, gh Exec, s *Saved) error {
 	}
 	if url != "" {
 		s.IssueURL, s.Stage = url, Published
+		if s.Draft.Mode == NewIssue {
+			s.Stage = IssueCreated
+		}
 	}
 	return nil
 }
@@ -338,6 +344,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 			return Result{}, err
 		}
 	}
+	fresh, labeled := false, false // labels known only when the issue was created in this run
 	if s.Stage == GistCreated {
 		body := d.Body
 		if s.GistURL != "" {
@@ -347,20 +354,95 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		if d.Queue != "" {
 			body += "\n<!-- hive-queue: " + d.Queue + " -->"
 		}
-		args := []string{"issue", "create", "--repo", d.Repo, "--title", d.Title, "--body-file", "-"}
+		// REST create: labels/type are silently dropped for non-maintainers instead of failing the create.
+		args := []string{"api", "--method", "POST", "repos/" + d.Repo + "/issues", "-f", "title=" + d.Title,
+			"-F", "body=@-", "-f", "labels[]=kind/bug"}
+		if d.Area != "" {
+			args = append(args, "-f", "labels[]=area/"+d.Area)
+		}
+		args = append(args, "-f", "type=Bug", "--jq", `.html_url + " " + ([.labels[].name]|join(","))`)
+		done := IssueCreated
 		if d.Mode == Confirm {
 			args = []string{"issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", d.IssueRef}
+			done = Published
 		}
-		url, err := step(IssuePending, Published, []byte(body), args...)
+		out, err := step(IssuePending, done, []byte(body), args...)
 		if err != nil {
 			return Result{}, err
 		}
-		s.IssueURL = url
+		url, labels, _ := strings.Cut(out, " ")
+		s.IssueURL, fresh, labeled = url, true, hasLabels(d, strings.Split(labels, ","))
 		if err := save(dir, s); err != nil {
 			return Result{}, err
 		}
 	}
-	return Result{IssueURL: s.IssueURL, GistURL: s.GistURL}, nil
+	r := Result{IssueURL: s.IssueURL, GistURL: s.GistURL}
+	n := s.IssueURL[strings.LastIndex(s.IssueURL, "/")+1:]
+	// Issue already exists from here on: failures are warnings, and the next Resume re-checks before writing.
+	warn := func(what string, err error, errb []byte) (Result, error) {
+		return r, fmt.Errorf("issue filed at %s, but %s failed (retry to finish): %w: %s", s.IssueURL, what, err, strings.TrimSpace(string(errb)))
+	}
+	if s.Stage == IssueCreated {
+		if !fresh {
+			out, errb, err := gh(ctx, nil, "issue", "view", n, "-R", d.Repo, "--json", "labels", "--jq", "[.labels[].name]|join(\",\")")
+			if err != nil {
+				return warn("reading labels", err, errb)
+			}
+			labeled = hasLabels(d, strings.Split(strings.TrimSpace(string(out)), ","))
+		}
+		posted := false
+		if !labeled && !fresh {
+			login, errb, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+			if err != nil {
+				return warn("reading user", err, errb)
+			}
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.user.login == %q and (.body | startswith("/kind bug"))) | .id`, strings.TrimSpace(string(login))))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !labeled && !posted {
+			// Prow applies /kind and /area for any commenter.
+			cmd := "/kind bug"
+			if d.Area != "" {
+				cmd += "\n/area " + d.Area
+			}
+			if _, errb, err := gh(ctx, []byte(cmd), "issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", n); err != nil {
+				return warn("labeling", err, errb)
+			}
+		}
+		s.Stage = LabelsDone
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == LabelsDone {
+		exists := false
+		if s.GistURL != "" && !fresh {
+			out, errb, err := gh(ctx, nil, "issue", "artifact", "list", n, "-R", d.Repo, "--json", "body", "--jq", ".[].body")
+			if err != nil {
+				return warn("reading artifacts", err, errb)
+			}
+			exists = slices.Contains(strings.Fields(string(out)), s.GistURL)
+		}
+		if s.GistURL != "" && !exists {
+			if _, errb, err := gh(ctx, nil, "issue", "artifact", "create", n, s.GistURL, "--name", "systemd-report", "-R", d.Repo); err != nil {
+				return warn("attaching report data", err, errb)
+			}
+		}
+		s.Stage = Published
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	return r, nil
+}
+
+// hasLabels reports whether GitHub applied every label we asked for.
+func hasLabels(d Draft, got []string) bool {
+	return slices.Contains(got, "kind/bug") && (d.Area == "" || slices.Contains(got, "area/"+d.Area))
 }
 
 func save(dir string, s *Saved) error {

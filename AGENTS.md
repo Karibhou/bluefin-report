@@ -20,6 +20,8 @@ Design and status: [systemd-report-design-plan.md](systemd-report-design-plan.md
   which reuses one package-level callback.
 - Tests never call the real `gh` for writes. Use `--dry-run` to drive the full flow by hand;
   it logs `gh` calls instead of running them.
+- Releases are calendar versions `YY.MM.N`, tagged deliberately with `make bump`
+  (never per commit, never by hand-picking a number). Agents do not tag or push releases.
 - Never weaken the privacy scrubber to make a test pass; the attachment must not contain hostname or username.
 
 ## Checks

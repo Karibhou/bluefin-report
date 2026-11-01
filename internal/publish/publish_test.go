@@ -5,25 +5,35 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
 type fake struct {
 	calls []string
+	stdin []string
 	fail  map[string]bool // keyed by "gh sub" or "api gists|issues|comments|user"
 	out   map[string]string
 }
 
-func (f *fake) exec(_ context.Context, _ []byte, args ...string) ([]byte, []byte, error) {
+const create = "api --method POST repos/projectbluefin/dakota/issues"
+
+func (f *fake) exec(_ context.Context, in []byte, args ...string) ([]byte, []byte, error) {
 	f.calls = append(f.calls, strings.Join(args, " "))
+	f.stdin = append(f.stdin, string(in))
 	k := args[0] + " " + args[1]
+	if args[1] == "artifact" {
+		k = "artifact " + args[2]
+	}
 	if args[0] == "api" {
 		p := args[1]
 		if p == "--paginate" {
 			p = args[2]
 		}
 		switch {
+		case p == "--method":
+			k = "issue create"
 		case strings.Contains(p, "/comments"):
 			k = "api comments"
 		case strings.Contains(p, "/issues"):
@@ -54,7 +64,7 @@ func (f *fake) count(prefix string) int {
 func newFake() *fake {
 	return &fake{fail: map[string]bool{}, out: map[string]string{
 		"gist create":   "https://gist.github.com/abc\n",
-		"issue create":  "Creating issue\nhttps://github.com/projectbluefin/dakota/issues/7\n",
+		"issue create":  "https://github.com/projectbluefin/dakota/issues/7 kind/bug,needs-triage\n",
 		"issue comment": "https://github.com/projectbluefin/dakota/issues/3#c1\n",
 		"api user":      "me\n",
 	}}
@@ -88,7 +98,7 @@ func TestSuccess(t *testing.T) {
 	if err != nil || r.GistURL != "https://gist.github.com/abc" || !strings.HasSuffix(r.IssueURL, "/issues/7") {
 		t.Fatal(r, err)
 	}
-	if f.count("gist create") != 1 || f.count("issue create") != 1 {
+	if f.count("gist create") != 1 || f.count(create) != 1 {
 		t.Fatal(f.calls)
 	}
 	if p, _ := Pending(dir); len(p) != 0 {
@@ -98,7 +108,7 @@ func TestSuccess(t *testing.T) {
 	if err != nil || s.Draft.Attachment != nil || s.Draft.Body != "" || s.IssueURL == "" {
 		t.Fatalf("published draft still holds the payload or lost its URL: %+v %v", s, err)
 	}
-	if r2, err := Submit(context.Background(), f.exec, dir, d); err != nil || r2 != r || f.count("issue create") != 1 {
+	if r2, err := Submit(context.Background(), f.exec, dir, d); err != nil || r2 != r || f.count(create) != 1 {
 		t.Fatal("re-submit of a published report must return the stored result", r2, err, f.calls)
 	}
 }
@@ -122,11 +132,11 @@ func TestGistFailureResumesWithoutDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.count("gist create") != 1 || f.count("issue create") != 1 || r.IssueURL == "" {
+	if f.count("gist create") != 1 || f.count(create) != 1 || r.IssueURL == "" {
 		t.Fatal(f.calls, r)
 	}
 	// Submitting a published report again is a no-op.
-	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil || f.count("issue create") != 1 {
+	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil || f.count(create) != 1 {
 		t.Fatal(err, f.calls)
 	}
 }
@@ -151,7 +161,7 @@ func TestUncertainResume(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		creates := f.count("issue create")
+		creates := f.count(create)
 		if found && (creates != 1 || !strings.HasSuffix(r.IssueURL, "/9")) {
 			t.Fatal("found: ", f.calls, r)
 		}
@@ -176,7 +186,7 @@ func TestGistNotFoundRecreatedOnce(t *testing.T) {
 	if _, err := Resume(context.Background(), f.exec, dir, p[0].ReportID); err != nil {
 		t.Fatal(err)
 	}
-	if f.count("gist create") != 2 || f.count("issue create") != 1 || f.count("api --paginate repos") != 0 {
+	if f.count("gist create") != 2 || f.count(create) != 1 || f.count("api --paginate repos") != 0 {
 		t.Fatal(f.calls)
 	}
 }
@@ -184,7 +194,7 @@ func TestGistNotFoundRecreatedOnce(t *testing.T) {
 func TestConfirm(t *testing.T) {
 	f := newFake()
 	r, err := Submit(context.Background(), f.exec, t.TempDir(), Draft{Mode: Confirm, Repo: "projectbluefin/dakota", Body: "same here", IssueRef: "#3"})
-	if err != nil || f.count("gist") != 0 || f.count("issue comment --repo projectbluefin/dakota --body-file - -- 3") != 1 || f.count("issue create") != 0 || r.IssueURL == "" {
+	if err != nil || f.count("gist") != 0 || f.count("issue comment --repo projectbluefin/dakota --body-file - -- 3") != 1 || f.count(create) != 0 || r.IssueURL == "" {
 		t.Fatal(f.calls, r, err)
 	}
 }
@@ -284,5 +294,87 @@ func TestDiscard(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, p[0].ReportID)); !os.IsNotExist(err) || Discard(dir, "..") == nil {
 		t.Fatal("not removed", err)
+	}
+}
+
+func TestLabelsAndArtifact(t *testing.T) {
+	for _, maintainer := range []bool{true, false} {
+		f := newFake()
+		f.out["issue create"] = "https://github.com/projectbluefin/dakota/issues/7 kind/bug,area/gaming\n"
+		if !maintainer {
+			f.out["issue create"] = "https://github.com/projectbluefin/dakota/issues/7 needs-triage\n"
+		}
+		d := draft
+		d.Area = "gaming"
+		if _, err := Submit(context.Background(), f.exec, t.TempDir(), d); err != nil {
+			t.Fatal(err)
+		}
+		if f.count(create+" -f title=t -F body=@- -f labels[]=kind/bug -f labels[]=area/gaming -f type=Bug") != 1 {
+			t.Fatal(f.calls)
+		}
+		slash := f.count("issue comment --repo projectbluefin/dakota --body-file - -- 7")
+		if maintainer && slash != 0 || !maintainer && (slash != 1 || !slices.Contains(f.stdin, "/kind bug\n/area gaming")) {
+			t.Fatal(maintainer, f.calls, f.stdin)
+		}
+		if f.count("issue artifact create 7 https://gist.github.com/abc --name systemd-report -R projectbluefin/dakota") != 1 {
+			t.Fatal(f.calls)
+		}
+	}
+}
+
+func TestNoGistNoArtifact(t *testing.T) {
+	f := newFake()
+	d := draft
+	d.Attachment = nil
+	if _, err := Submit(context.Background(), f.exec, t.TempDir(), d); err != nil || f.count("issue artifact") != 0 {
+		t.Fatal(err, f.calls)
+	}
+}
+
+func TestResumeAfterArtifactFailure(t *testing.T) {
+	for _, exists := range []bool{false, true} {
+		f, dir := newFake(), t.TempDir()
+		f.out["issue create"] = "https://github.com/projectbluefin/dakota/issues/7 \n" // labels dropped
+		f.fail["artifact create"] = true
+		r, err := Submit(context.Background(), f.exec, dir, draft)
+		p, _ := Pending(dir)
+		if err == nil || r.IssueURL == "" || len(p) != 1 || p[0].Stage != LabelsDone {
+			t.Fatal(err, r, p)
+		}
+		f.fail["artifact create"] = false
+		f.out["issue comment"] = "" // comment already posted by us
+		if exists {
+			f.out["artifact list"] = "https://gist.github.com/abc\n"
+		}
+		if _, err := Resume(context.Background(), f.exec, dir, p[0].ReportID); err != nil {
+			t.Fatal(err)
+		}
+		want := 2
+		if exists {
+			want = 1
+		}
+		if f.count(create) != 1 || f.count("issue comment") != 1 || f.count("issue artifact create") != want {
+			t.Fatal(exists, f.calls)
+		}
+		if p, _ := Pending(dir); len(p) != 0 {
+			t.Fatal(p)
+		}
+	}
+}
+
+func TestResumeAfterCrashPostIssue(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	// Crash right after create: state says IssueCreated, slash comment already on GitHub.
+	if err := save(dir, &Saved{ReportID: "r1", Stage: IssueCreated, Draft: draft, GistURL: "https://gist.github.com/abc",
+		IssueURL: "https://github.com/projectbluefin/dakota/issues/7"}); err != nil {
+		t.Fatal(err)
+	}
+	f.out["issue view"] = "needs-triage\n"
+	f.out["api comments"] = "123\n"
+	if _, err := Resume(context.Background(), f.exec, dir, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if f.count(create) != 0 || f.count("issue comment") != 0 || f.count("issue artifact create") != 1 {
+		t.Fatal(f.calls)
 	}
 }

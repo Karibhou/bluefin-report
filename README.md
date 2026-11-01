@@ -46,6 +46,10 @@ make test           # go test -race ./...
 make run            # build and run with --dry-run
 make lint           # gofmt + go vet
 make validate-data  # desktop-file-validate (+ appstreamcli if present)
+make bump           # tag the next release, YY.MM.N (does not push)
 ```
+
+Releases use calendar versions `YY.MM.N` and are cut deliberately with `make bump`,
+not per commit. `bluefin-report --version` prints the running version.
 
 Licensed under Apache-2.0.
