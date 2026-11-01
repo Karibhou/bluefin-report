@@ -419,16 +419,20 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		}
 	}
 	if s.Stage == LabelsDone {
-		exists := false
+		// The artifact is a convenience: the body already links the gist. When GitHub or an older gh
+		// refuses artifacts outright (no permission, preview unavailable), finish without it;
+		// only transient failures leave the draft pending for Resume.
+		exists, skip := false, false
 		if s.GistURL != "" && !fresh {
 			out, errb, err := gh(ctx, nil, "issue", "artifact", "list", n, "-R", d.Repo, "--json", "body", "--jq", ".[].body")
-			if err != nil {
+			if err != nil && !artifactsRefused(errb) {
 				return warn("reading artifacts", err, errb)
 			}
+			skip = err != nil
 			exists = slices.Contains(strings.Fields(string(out)), s.GistURL)
 		}
-		if s.GistURL != "" && !exists {
-			if _, errb, err := gh(ctx, nil, "issue", "artifact", "create", n, s.GistURL, "--name", "systemd-report", "-R", d.Repo); err != nil {
+		if s.GistURL != "" && !exists && !skip {
+			if _, errb, err := gh(ctx, nil, "issue", "artifact", "create", n, s.GistURL, "--name", "systemd-report", "-R", d.Repo); err != nil && !artifactsRefused(errb) {
 				return warn("attaching report data", err, errb)
 			}
 		}
@@ -438,6 +442,18 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		}
 	}
 	return r, nil
+}
+
+// artifactsRefused reports a permanent refusal (permission, missing preview command), as opposed to
+// a network failure worth retrying.
+func artifactsRefused(stderr []byte) bool {
+	s := string(stderr)
+	for _, m := range []string{"HTTP 401", "HTTP 403", "HTTP 404", "HTTP 410", "HTTP 422", "unknown command", "Resource not accessible", "must have"} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasLabels reports whether GitHub applied every label we asked for.

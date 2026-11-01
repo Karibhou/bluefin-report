@@ -13,7 +13,8 @@ import (
 type fake struct {
 	calls []string
 	stdin []string
-	fail  map[string]bool // keyed by "gh sub" or "api gists|issues|comments|user"
+	fail  map[string]bool   // keyed by "gh sub" or "api gists|issues|comments|user"
+	errs  map[string]string // stderr for a failing key; default "boom"
 	out   map[string]string
 }
 
@@ -43,6 +44,9 @@ func (f *fake) exec(_ context.Context, in []byte, args ...string) ([]byte, []byt
 		}
 	}
 	if f.fail[k] {
+		if e, ok := f.errs[k]; ok {
+			return nil, []byte(e), errors.New("exit 1")
+		}
 		return nil, []byte("boom"), errors.New("exit 1")
 	}
 	return []byte(f.out[k]), nil, nil
@@ -376,5 +380,30 @@ func TestResumeAfterCrashPostIssue(t *testing.T) {
 	}
 	if f.count(create) != 0 || f.count("issue comment") != 0 || f.count("issue artifact create") != 1 {
 		t.Fatal(f.calls)
+	}
+}
+
+func TestArtifactRefusedStillPublishes(t *testing.T) {
+	for _, stderr := range []string{"HTTP 403: Resource not accessible by integration", `unknown command "artifact" for "gh issue"`} {
+		f, dir := newFake(), t.TempDir()
+		f.fail["artifact create"] = true
+		f.errs = map[string]string{"artifact create": stderr}
+		d := draft
+		d.ReportID = NewReportID()
+		r, err := Submit(context.Background(), f.exec, dir, d)
+		if p, _ := Pending(dir); err != nil || r.IssueURL == "" || len(p) != 0 {
+			t.Fatalf("%q: a refused artifact must not leave the report pending: err=%v pending=%v", stderr, err, p)
+		}
+	}
+	// A transient failure keeps it pending for Resume.
+	f, dir := newFake(), t.TempDir()
+	f.fail["artifact create"] = true
+	d := draft
+	d.ReportID = NewReportID()
+	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+		t.Fatal("transient artifact failure should be reported")
+	}
+	if p, _ := Pending(dir); len(p) != 1 {
+		t.Fatal("transient artifact failure should stay pending", p)
 	}
 }
