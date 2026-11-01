@@ -38,24 +38,27 @@ func Run(ctx context.Context, args ...string) ([]byte, []byte, error) {
 	if out.over {
 		err = errors.Join(err, errors.New("systemd-report output exceeded 8 MiB and was truncated"))
 	}
-	return out.Bytes(), errb.Bytes(), err
+	return out.buf.Bytes(), errb.buf.Bytes(), err
 }
 
+// capped keeps at most max bytes. The buffer is a named field, not embedded:
+// embedding would promote bytes.Buffer.ReadFrom, which io.Copy (and so os/exec)
+// prefers over Write, bypassing the cap.
 type capped struct {
-	bytes.Buffer
+	buf  bytes.Buffer
 	max  int
 	over bool
 }
 
 func (c *capped) Write(p []byte) (int, error) {
-	if room := c.max - c.Len(); len(p) > room {
+	if room := c.max - c.buf.Len(); len(p) > room {
 		c.over = true
 		if room > 0 {
-			c.Buffer.Write(p[:room])
+			c.buf.Write(p[:room])
 		}
 		return len(p), nil
 	}
-	return c.Buffer.Write(p)
+	return c.buf.Write(p)
 }
 
 // Scope is the systemd-report runtime scope.
