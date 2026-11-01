@@ -1,0 +1,1 @@
+{"mediaType":"application/vnd.io.systemd.report","timestamp":"Sun 2026-11-01 00:37:42 UTC","metrics":[{"name":"io.systemd.Manager.SystemState","value":"running"},{"name":"io.systemd.Manager.UnitActiveState","object":"example-agent.service","value":"failed"},{"name":"io.systemd.Manager.Version","value":"262.1"}]}

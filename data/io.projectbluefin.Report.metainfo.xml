@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.projectbluefin.Report</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Bluefin Report</name>
+  <summary>Review and share system health reports</summary>
+  <description>
+    <p>Bluefin Report collects a systemd-report snapshot of your system, lets you review exactly what will be shared, and files it as a GitHub issue or confirmation comment.</p>
+  </description>
+  <developer id="io.projectbluefin">
+    <name>Project Bluefin</name>
+  </developer>
+  <url type="homepage">https://projectbluefin.io</url>
+  <launchable type="desktop-id">io.projectbluefin.Report.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-31"/>
+  </releases>
+</component>

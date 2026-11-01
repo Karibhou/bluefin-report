@@ -1,0 +1,2 @@
+{"name":"io.systemd.Basic.Architecture","description":"CPU architecture","type":"string"}
+{"name":"io.systemd.Basic.CPUUsage","description":"Aggregate CPU usage across all CPUs in nanoseconds (type=user|system)","type":"counter"}

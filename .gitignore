@@ -1,0 +1,4 @@
+/bluefin-report
+/dist/
+*.out
+/build/

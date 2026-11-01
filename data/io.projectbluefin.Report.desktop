@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Bluefin Report
+Comment=Review and share a system health report
+Exec=bluefin-report
+Icon=io.projectbluefin.Report
+Terminal=false
+Categories=System;GTK;
+Keywords=report;bug;diagnostics;systemd;health;
+StartupNotify=true
