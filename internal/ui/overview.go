@@ -1,0 +1,412 @@
+package ui
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os/exec"
+	"slices"
+	"strings"
+	"time"
+
+	"codeberg.org/puregotk/puregotk/v4/adw"
+	"codeberg.org/puregotk/puregotk/v4/gio"
+	"codeberg.org/puregotk/puregotk/v4/glib"
+	"codeberg.org/puregotk/puregotk/v4/gobject"
+	"codeberg.org/puregotk/puregotk/v4/gtk"
+	"codeberg.org/puregotk/puregotk/v4/pango"
+
+	"github.com/projectbluefin/bluefin-report/internal/extras"
+	"github.com/projectbluefin/bluefin-report/internal/publish"
+	"github.com/projectbluefin/bluefin-report/internal/snapshot"
+)
+
+// ---------- Overview ----------
+
+func (u *ui) buildOverview() *adw.NavigationPage {
+	header := adw.NewHeaderBar()
+	refreshBtn := gtk.NewButtonFromIconName("view-refresh-symbolic")
+	refreshBtn.SetTooltipText("Refresh")
+	refreshBtn.SetActionName("win.refresh")
+	header.PackStart(&refreshBtn.Widget)
+	menu := gio.NewMenu()
+	section := func(items ...[2]string) {
+		s := gio.NewMenu()
+		for _, it := range items {
+			s.Append(it[0], it[1])
+		}
+		item := gio.NewMenuItemSection("", &s.MenuModel)
+		item.SetAttributeValue("label", nil) // unlabeled: a separator, not a blank header
+		menu.AppendItem(item)
+	}
+	section([2]string{"_Drafts", "win.drafts"})
+	section([2]string{"_Keyboard Shortcuts", "win.shortcuts"}, [2]string{"_Help", "win.help"}, [2]string{"_About " + appName, "win.about"})
+	mb := gtk.NewMenuButton()
+	mb.SetIconName("open-menu-symbolic")
+	mb.SetTooltipText("Main Menu")
+	mb.SetMenuModel(&menu.MenuModel)
+	mb.SetPrimary(true)
+	header.PackEnd(&mb.Widget)
+
+	// Primary task: one call to action in open space (HIG: pill + suggested for the view's main action).
+	heading := gtk.NewLabel("Something Not Working?")
+	heading.AddCssClass("title-2")
+	heading.SetWrap(true)
+	heading.SetJustify(gtk.JustifyCenterValue)
+	u.reportDesc = gtk.NewLabel("")
+	u.reportDesc.AddCssClass("dim-label")
+	u.reportDesc.SetWrap(true)
+	u.reportDesc.SetJustify(gtk.JustifyCenterValue)
+	report := pill("Report a Problem", func() { u.openCompose(publish.NewIssue) })
+	report.AddCssClass("suggested-action")
+	report.SetHalign(gtk.AlignCenterValue)
+	report.SetMarginTop(6)
+	hero := gtk.NewBox(gtk.OrientationVerticalValue, 6)
+	hero.Append(&heading.Widget)
+	hero.Append(&u.reportDesc.Widget)
+	hero.Append(&report.Widget)
+
+	// Secondary tasks: rows that say who each one is for, so Update isn't picked by someone it will refuse.
+	existing := group("Already Reported?")
+	navRow := func(title, sub, icon, suffix string, cb func()) *adw.ActionRow {
+		r := adw.NewActionRow()
+		r.SetTitle(title)
+		r.SetSubtitle(sub)
+		r.SetActivatable(true)
+		r.AddPrefix(&gtk.NewImageFromIconName(icon).Widget)
+		r.AddSuffix(&gtk.NewImageFromIconName(suffix).Widget)
+		r.ConnectActivated(hold(func(adw.ActionRow) { cb() }))
+		return r
+	}
+	confirm := navRow("Confirm Existing Issue", "You have the same problem as an issue someone already reported",
+		"system-users-symbolic", "go-next-symbolic", func() { u.openCompose(publish.Confirm) })
+	update := navRow("Update Your Issue", "Add a new system report to an issue you opened",
+		"document-edit-symbolic", "go-next-symbolic", func() { u.openCompose(publish.Update) })
+	existing.Add(&confirm.Widget)
+	existing.Add(&update.Widget)
+	u.reportActs = []*gtk.Widget{&report.Widget, &confirm.Widget, &update.Widget}
+	for _, w := range u.reportActs {
+		w.SetSensitive(false) // until a snapshot tells us which repo this image reports to
+	}
+
+	hg := group("System Health")
+	u.health = gtk.NewListBox()
+	u.health.SetSelectionMode(gtk.SelectionNoneValue)
+	u.health.AddCssClass("boxed-list")
+	hg.Add(&u.health.Widget)
+	u.helpGroup = adw.NewPreferencesGroup()
+	help := navRow("Get Help Fixing This", "Copies a summary of these problems and opens the assistant in Control Center",
+		"help-browser-symbolic", "adw-external-link-symbolic", u.troubleshoot) // opens another app, not a page
+	u.helpGroup.Add(&help.Widget)
+	u.helpGroup.SetVisible(false)
+
+	dg := adw.NewPreferencesGroup() // unfinished reports belong next to the actions that create them
+	dg.SetVisible(false)
+	u.draftsGrp = dg
+	u.draftsRow = adw.NewActionRow()
+	u.draftsRow.SetTitle("Unfinished Reports")
+	u.draftsRow.SetActivatable(true)
+	u.draftsRow.AddPrefix(&gtk.NewImageFromIconName("document-edit-symbolic").Widget)
+	u.draftsCount = gtk.NewLabel("")
+	u.draftsCount.AddCssClass("dim-label")
+	u.draftsRow.AddSuffix(&u.draftsCount.Widget)
+	u.draftsRow.AddSuffix(&gtk.NewImageFromIconName("go-next-symbolic").Widget)
+	u.draftsRow.SetActionName("win.drafts")
+	dg.Add(&u.draftsRow.Widget)
+
+	// Details are for maintainers and the curious; collapsed so they don't bury the task.
+	sys := group("This System")
+	u.sysDetails = adw.NewExpanderRow()
+	u.sysDetails.SetTitle("System Details")
+	for i, t := range []string{"Name", "Version", "Image", "Kernel", "Architecture", "State", "Image ref", "Tag", "Digest", "CPU", "GPU", "GNOME"} {
+		r := adw.NewActionRow()
+		r.SetTitle(t)
+		r.AddCssClass("property")
+		u.sysRows[i] = r
+		u.sysDetails.AddRow(&r.Widget)
+	}
+	sys.Add(&u.sysDetails.Widget)
+	browse := navRow("Browse All Metrics", "Everything this report collects, searchable", "view-list-symbolic", "go-next-symbolic",
+		func() { u.nav.PushByTag("metrics") })
+	sys.Add(&browse.Widget)
+
+	u.spinner = adw.NewSpinner()
+	loading := adw.NewStatusPage()
+	loading.SetTitle("Collecting system report…")
+	loading.SetChild(&u.spinner.Widget)
+
+	u.statusPage = adw.NewStatusPage()
+	u.statusPage.SetIconName("dialog-warning-symbolic")
+	u.statusPage.SetChild(&pill("Try Again", u.refresh).Widget)
+
+	u.ovStack = gtk.NewStack()
+	u.ovStack.AddNamed(&loading.Widget, "loading")
+	// Task first so reporting never needs a scroll; context follows, details last.
+	u.ovStack.AddNamed(scrolled(&hero.Widget, &dg.Widget, &existing.Widget, &hg.Widget, &u.helpGroup.Widget, &sys.Widget), "ready")
+	u.ovStack.AddNamed(&u.statusPage.Widget, "error")
+	return u.page(appName, "overview", header, &u.ovStack.Widget)
+}
+
+func (u *ui) refresh() {
+	if u.cancel != nil {
+		u.cancel()
+	}
+	u.gen++
+	gen := u.gen
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	u.cancel = cancel
+	u.snap = nil
+	u.reviewBtn.SetSensitive(false)
+	u.ovStack.SetVisibleChildName("loading")
+	u.refreshAct.SetEnabled(false)
+	log.Printf("ui: collecting snapshot (gen %d)", gen)
+	go func() {
+		defer cancel()
+		start := time.Now()
+		s, err := snapshot.Take(ctx, snapshot.Run, nil)
+		id := extras.Probe(ctx)
+		post(func() {
+			if gen != u.gen {
+				log.Printf("ui: dropping stale snapshot gen %d", gen)
+				return
+			}
+			u.refreshAct.SetEnabled(true)
+			log.Printf("ui: snapshot gen %d in %s: %d system, %d user metrics, err=%v",
+				gen, time.Since(start).Round(time.Millisecond), len(s.System.Metrics), len(s.User.Metrics), err)
+			log.Printf("ui: identity ref=%q tag=%q digest=%q cpu=%q gpu=%q gnome=%q", id.Ref, id.Tag, id.Digest, id.CPU, id.GPU, id.GNOME)
+			u.ident = id
+			u.loaded(s, err)
+		})
+	}()
+}
+
+func (u *ui) loaded(s snapshot.Snapshot, err error) {
+	if err != nil {
+		u.snap = nil
+		if errors.Is(err, snapshot.ErrNotInstalled) {
+			u.statusPage.SetTitle("System reports are unavailable")
+			u.statusPage.SetDescription(snapshot.Binary + " was not found. This system needs systemd 261 or newer with systemd-report")
+		} else {
+			u.statusPage.SetTitle("Couldn't collect a report")
+			u.statusPage.SetDescription(err.Error())
+		}
+		u.ovStack.SetVisibleChildName("error")
+		u.announce(u.statusPage.GetTitle())
+		return
+	}
+	u.snap = &s
+	u.sum = s.Summary()
+	u.repoName = publish.Route(u.sum.ImageID)
+	for _, w := range u.reportActs {
+		w.SetSensitive(u.repoName != "")
+	}
+	if u.repoName == "" {
+		u.reportDesc.SetText("Reporting isn't available for this image (" + u.sum.ImageID + "). Only Dakota and Utah accept reports.")
+	} else {
+		u.reportDesc.SetText("Describe what went wrong and send it to the " + u.repoName +
+			" maintainers with a privacy-checked system report. You review everything before it's published.")
+	}
+	u.sysDetails.SetSubtitle(strings.TrimSpace(u.sum.Name + " " + u.sum.ImageVersion))
+	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState,
+		u.ident.Ref, u.ident.Tag, u.ident.Digest, u.ident.CPU, u.ident.GPU, u.ident.GNOME} {
+		if v == "" {
+			v = "Unknown"
+		}
+		u.sysRows[i].SetSubtitle(v)
+	}
+
+	u.health.RemoveAll()
+	add := func(title, sub, icon string) {
+		r := adw.NewActionRow()
+		r.SetTitle(title)
+		r.SetSubtitle(sub)
+		r.AddPrefix(&gtk.NewImageFromIconName(icon).Widget)
+		u.health.Append(&r.Widget)
+	}
+	for _, f := range u.sum.FailedUnits {
+		add(f, "Failed unit", "dialog-error-symbolic")
+	}
+	for _, w := range u.sum.Unreachable {
+		add(w, "Source unreachable", "network-offline-symbolic")
+	}
+	for _, w := range u.sum.Warnings {
+		if !slices.Contains(u.sum.Unreachable, w) { // Unreachable is a subset of Warnings
+			add(w, "Warning", "dialog-warning-symbolic")
+		}
+	}
+	problem := len(u.sum.FailedUnits)+len(u.sum.Warnings) > 0
+	u.helpGroup.SetVisible(problem)
+	if !problem {
+		add("No problems found", "No failed units or warnings", "object-select-symbolic")
+	}
+
+	rows := make([]string, 0, len(s.System.Metrics)+len(s.User.Metrics))
+	row := func(prefix string, m snapshot.Metric) string {
+		name := prefix + m.Name
+		if m.Object != "" {
+			name += " [" + m.Object + "]"
+		}
+		return name + "\n" + m.String() // bind splits name / value onto two lines
+	}
+	for _, m := range s.System.Metrics {
+		rows = append(rows, row("", m))
+	}
+	for _, m := range s.User.Metrics {
+		rows = append(rows, row("user: ", m))
+	}
+	u.metrics.Splice(0, u.metrics.GetNItems(), rows)
+	u.syncResults()
+	u.ovStack.SetVisibleChildName("ready")
+	u.syncReview()
+	units := "units"
+	if len(u.sum.FailedUnits) == 1 {
+		units = "unit"
+	}
+	u.announce(fmt.Sprintf("System report collected: %d failed %s", len(u.sum.FailedUnits), units))
+}
+
+// announce tells assistive technologies about a change nothing else focuses.
+func (u *ui) announce(msg string) {
+	log.Printf("ui: announce: %s", msg)
+	u.win.Announce(msg, gtk.AccessibleAnnouncementPriorityMediumValue)
+}
+
+// ---------- Metrics ----------
+
+func (u *ui) buildMetrics() {
+	u.metrics = gtk.NewStringList(nil)
+	expr := gtk.NewPropertyExpression(gtk.StringObjectGLibType(), nil, "string")
+	u.filter = gtk.NewStringFilter(&expr.Expression)
+	u.filter.SetMatchMode(gtk.StringFilterMatchModeSubstringValue)
+	u.filter.SetIgnoreCase(true)
+	model := gtk.NewFilterListModel(u.metrics, &u.filter.Filter)
+
+	f := gtk.NewSignalListItemFactory()
+	f.ConnectSetup(hold(func(_ gtk.SignalListItemFactory, p uintptr) {
+		row := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+		row.SetMarginStart(12)
+		row.SetMarginEnd(12)
+		row.SetMarginTop(6)
+		row.SetMarginBottom(6)
+		box := gtk.NewBox(gtk.OrientationVerticalValue, 6)
+		box.SetHexpand(true)
+		for _, mode := range []pango.EllipsizeMode{pango.EllipsizeMiddleValue, pango.EllipsizeEndValue} { // name, value
+			l := gtk.NewLabel("")
+			l.SetXalign(0)
+			l.SetEllipsize(mode)
+			l.AddCssClass("monospace")
+			if mode == pango.EllipsizeEndValue {
+				l.AddCssClass("dim-label")
+				l.AddCssClass("caption")
+			}
+			box.Append(&l.Widget)
+		}
+		row.Append(&box.Widget)
+		copy := gtk.NewButtonFromIconName("edit-copy-symbolic")
+		copy.SetTooltipText("Copy Metric Value")
+		copy.SetValign(gtk.AlignCenterValue)
+		copy.AddCssClass("flat")
+		copy.SetActionName("win.copy-metric")
+		row.Append(&copy.Widget)
+		gtk.ListItemNewFromInternalPtr(p).SetChild(&row.Widget)
+	}))
+	f.ConnectBind(hold(func(_ gtk.SignalListItemFactory, p uintptr) {
+		li := gtk.ListItemNewFromInternalPtr(p)
+		s := gtk.StringObjectNewFromInternalPtr(li.GetItem().GoPointer()).GetString()
+		name, val, _ := strings.Cut(s, "\n")
+		row := li.GetChild()
+		box := row.GetFirstChild()
+		gtk.LabelNewFromInternalPtr(box.GetFirstChild().GoPointer()).SetText(name)
+		gtk.LabelNewFromInternalPtr(box.GetLastChild().GoPointer()).SetText(val)
+		box.SetTooltipText(name + " = " + val)
+		gtk.ButtonNewFromInternalPtr(row.GetLastChild().GoPointer()).SetActionTargetValue(glib.NewVariantString(val))
+	}))
+	lv := gtk.NewListView(gtk.NewNoSelection(model), &f.ListItemFactory)
+	clamp := adw.NewClampScrollable() // same max width as the other pages
+	clamp.SetChild(&lv.Widget)
+	sw := gtk.NewScrolledWindow()
+	sw.SetChild(&clamp.Widget)
+	sw.SetVexpand(true)
+
+	empty := adw.NewStatusPage()
+	empty.SetIconName("edit-find-symbolic")
+	results := gtk.NewStack()
+	results.AddNamed(&sw.Widget, "results")
+	results.AddNamed(&empty.Widget, "empty")
+	results.SetVexpand(true)
+	u.syncResults = func() {
+		if model.GetNItems() > 0 {
+			results.SetVisibleChildName("results")
+			return
+		}
+		title, desc := emptyState(u.metrics.GetNItems(), u.search.GetText())
+		empty.SetTitle(title)
+		empty.SetDescription(desc)
+		results.SetVisibleChildName("empty")
+	}
+	model.ConnectNotify(hold(func(gobject.Object, uintptr) { u.syncResults() }))
+
+	search := gtk.NewSearchEntry()
+	u.search = search
+	search.SetPlaceholderText("Filter metrics")
+	a11yLabel(&search.Widget, "Filter metrics") // a placeholder is not an accessible name
+	search.ConnectSearchChanged(hold(func(gtk.SearchEntry) {
+		u.filter.SetSearch(search.GetText())
+		u.syncResults()
+	}))
+	search.SetMarginTop(6)
+	search.SetMarginBottom(6)
+	search.SetMarginStart(12)
+	search.SetMarginEnd(12)
+
+	box := gtk.NewBox(gtk.OrientationVerticalValue, 0)
+	sclamp := adw.NewClamp()
+	sclamp.SetChild(&search.Widget)
+	box.Append(&sclamp.Widget)
+	box.Append(&results.Widget)
+	u.syncResults()
+	u.nav.Add(u.page("Metrics", "metrics", nil, &box.Widget))
+}
+
+// emptyState picks the metrics status page text: an empty collection wins over
+// a non-matching query so a retained search never hides a failed collection.
+func emptyState(total uint32, query string) (title, desc string) {
+	if total > 0 && query != "" {
+		return "No Results Found", "Try a different search or clear the filter"
+	}
+	return "No Metrics Available", "Refresh the snapshot and check the Overview for collection warnings"
+}
+
+// troubleshoot hands the problem to ChairLift's Ask Bluefin flow, which owns the assistant's readiness and setup.
+// Unit names can embed the username or hostname, so the copied prompt carries only image and counts;
+// the assistant's read-only tools inspect the live services and logs themselves.
+func (u *ui) troubleshoot() {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Help troubleshoot this Bluefin problem from Report a Problem.\nImage: %s %s (%s)\n", u.sum.Name, u.sum.ImageVersion, u.sum.ImageID)
+	fmt.Fprintf(&b, "Failed units: %d. Report warnings: %d.\n", len(u.sum.FailedUnits), len(u.sum.Warnings))
+	b.WriteString("List the failed units, inspect their logs and status with your read-only tools, then suggest the next step.")
+	u.win.GetClipboard().SetText(b.String())
+	if u.dryRun {
+		log.Print("dry-run: chairlift --ask-bluefin")
+		u.toast("Problem summary copied")
+		return
+	}
+	go func() {
+		cmd := exec.Command("chairlift", "--ask-bluefin")
+		err := cmd.Start()
+		if err == nil {
+			go cmd.Wait() // reap it; ChairLift reports its own failures
+		}
+		post(func() {
+			switch {
+			case errors.Is(err, exec.ErrNotFound):
+				u.showError("Couldn't Open Control Center", "Troubleshooting help needs Bluefin Control Center, which isn't installed")
+			case err != nil:
+				u.showError("Couldn't Open Control Center", err.Error())
+			default:
+				u.toast("Problem summary copied. Paste it into the assistant")
+			}
+		})
+	}()
+}
