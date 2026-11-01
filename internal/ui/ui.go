@@ -459,7 +459,7 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 		u.snap = nil
 		if errors.Is(err, snapshot.ErrNotInstalled) {
 			u.statusPage.SetTitle("System reports are unavailable")
-			u.statusPage.SetDescription(snapshot.Binary + " was not found. This system needs systemd 262 or newer.")
+			u.statusPage.SetDescription(snapshot.Binary + " was not found. This system needs systemd 261 or newer with systemd-report.")
 		} else {
 			u.statusPage.SetTitle("Couldn't collect a report")
 			u.statusPage.SetDescription(err.Error())

@@ -7,7 +7,7 @@ login as an issue in the right Bluefin repository, with the full report attached
 
 ## Requirements
 
-- systemd 262 (`systemd-report`)
+- systemd 261 or newer with `systemd-report` (Dakota ships 262, Utah 261)
 - GTK 4 and libadwaita 1 (≥ 1.6) shared libraries from your OS
 - [`gh`](https://cli.github.com/) — sign-in happens inside the app
 
