@@ -78,7 +78,7 @@ func TestCollectOnlyOptedIn(t *testing.T) {
 		t.Fatalf("%v %v", got, *calls)
 	}
 	md := Markdown(got)
-	if !strings.Contains(md, "<details><summary>Crashes in the last 7 days</summary>") || strings.Contains(md, "Flatpak") {
+	if !strings.Contains(md, "<details><summary>Crashes in the Last 7 Days</summary>") || strings.Contains(md, "Flatpak") {
 		t.Fatalf("markdown: %s", md)
 	}
 }

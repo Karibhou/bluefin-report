@@ -1,4 +1,4 @@
-# Report a problem (bluefin-report)
+# Report a Problem (bluefin-report)
 
 A GTK4/Libadwaita app that turns a [`systemd-report`](https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html)
 snapshot into a reviewed, privacy-scrubbed GitHub issue. You see exactly what

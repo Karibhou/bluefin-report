@@ -261,6 +261,6 @@ Bonedigger and `ujust report` are unchanged.
 
 ## 11. Open decisions
 
-1. App name and ID — user-visible name `Report a problem`, app id `io.projectbluefin.Report`, binary `bluefin-report`. .desktop is in Utility;X-GNOME-Utilities (GNOME Utilities folder).
+1. App name and ID — user-visible name `Report a Problem` (HIG header capitalization), app id `io.projectbluefin.Report`, binary `bluefin-report`. .desktop is in Utility;X-GNOME-Utilities (GNOME Utilities folder).
 2. Hive marker format for queue preference — needs the Hive owner's answer.
 3. Whether to attach user-scope report by default (it names user units; less sensitive than system, still personal).

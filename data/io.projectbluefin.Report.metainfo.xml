@@ -3,10 +3,10 @@
   <id>io.projectbluefin.Report</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
-  <name>Report a problem</name>
+  <name>Report a Problem</name>
   <summary>Report bugs, crashes and freezes with a reviewed system report</summary>
   <description>
-    <p>Report a problem collects a systemd-report snapshot of your system, lets you review exactly what will be shared, and files it as a GitHub issue, or adds your report to an existing issue.</p>
+    <p>Report a Problem collects a systemd-report snapshot of your system, lets you review exactly what will be shared, and files it as a GitHub issue, or adds your report to an existing issue.</p>
   </description>
   <keywords>
     <keyword>bug</keyword>

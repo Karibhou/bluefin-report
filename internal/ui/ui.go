@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 	"unsafe"
 
 	"codeberg.org/puregotk/puregotk/v4/adw"
@@ -34,7 +36,7 @@ import (
 const appID = "io.projectbluefin.Report"
 
 // appName is the user-visible name; data/*.desktop and metainfo repeat it.
-const appName = "Report a problem"
+const appName = "Report a Problem"
 
 // appIcon is the icon name used by the About dialog; data/*.desktop Icon= must match (checked by a test).
 const appIcon = "io.projectbluefin.Report"
@@ -108,7 +110,7 @@ type ui struct {
 	repo        *adw.ActionRow // shows repoName; there is no choice: reports go to the running image's repo
 	repoName    string
 	helpGroup   *adw.PreferencesGroup
-	helpBtns    *gtk.FlowBox
+	helpBtns    *adw.WrapBox
 	title       *adw.EntryRow
 	issueRef    *adw.EntryRow
 	desc        *gtk.TextBuffer
@@ -123,6 +125,8 @@ type ui struct {
 	reviewBtn   *gtk.Button
 	refErr      *gtk.Label
 	shots       []string // screenshot paths chosen on Compose
+	descView    *gtk.TextView
+	addShot     *adw.ButtonRow // last row of shotList
 	shotList    *gtk.ListBox
 	shotDialog  *gtk.FileDialog
 
@@ -146,11 +150,14 @@ type ui struct {
 	doneURL  string
 
 	// drafts
-	draftsRow  *adw.ActionRow
-	draftList  *gtk.ListBox
-	discardDlg *adw.AlertDialog
-	discardID  string
-	discardAct *gio.SimpleAction
+	draftsRow   *adw.ActionRow
+	draftsCount *gtk.Label
+	draftsGrp   *adw.PreferencesGroup
+	draftList   *gtk.ListBox
+	draftsStack *gtk.Stack // "list" or "empty"
+	discardDlg  *adw.AlertDialog
+	discardID   string
+	discardAct  *gio.SimpleAction
 
 	// sign-in
 	signInDlg  *adw.AlertDialog
@@ -285,10 +292,14 @@ func (u *ui) activate() {
 
 // showError reports a failed user action in a dialog: it stays until
 // dismissed and appears on whichever page the action ran from.
-func (u *ui) showError(msg string) {
-	log.Print("ui: error: ", msg)
-	a := adw.NewAlertDialog("Something went wrong", msg)
-	a.AddResponse("ok", "OK")
+func (u *ui) showError(heading, body string) {
+	log.Printf("ui: error: %s: %s", heading, body)
+	if r, n := utf8.DecodeRuneInString(body); n > 0 { // Go errors start lowercase; dialog bodies are sentences
+		body = string(unicode.ToUpper(r)) + body[n:]
+	}
+	a := adw.NewAlertDialog(heading, body)
+	a.AddResponse("close", "_Close")
+	a.SetDefaultResponse("close")
 	a.Present(&u.win.Widget)
 }
 
@@ -353,13 +364,21 @@ func pill(label string, cb func()) *gtk.Button {
 func (u *ui) buildOverview() *adw.NavigationPage {
 	header := adw.NewHeaderBar()
 	refreshBtn := gtk.NewButtonFromIconName("view-refresh-symbolic")
-	refreshBtn.SetTooltipText("Refresh (Ctrl+R)")
+	refreshBtn.SetTooltipText("Refresh")
 	refreshBtn.SetActionName("win.refresh")
 	header.PackStart(&refreshBtn.Widget)
 	menu := gio.NewMenu()
-	menu.Append("Drafts", "win.drafts")
-	menu.Append("Keyboard Shortcuts", "win.shortcuts")
-	menu.Append("About "+appName, "win.about")
+	section := func(items ...[2]string) {
+		s := gio.NewMenu()
+		for _, it := range items {
+			s.Append(it[0], it[1])
+		}
+		item := gio.NewMenuItemSection("", &s.MenuModel)
+		item.SetAttributeValue("label", nil) // unlabeled: a separator, not a blank header
+		menu.AppendItem(item)
+	}
+	section([2]string{"_Drafts", "win.drafts"})
+	section([2]string{"_Keyboard Shortcuts", "win.shortcuts"}, [2]string{"_Help", "win.help"}, [2]string{"_About " + appName, "win.about"})
 	mb := gtk.NewMenuButton()
 	mb.SetIconName("open-menu-symbolic")
 	mb.SetTooltipText("Main Menu")
@@ -367,7 +386,7 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	mb.SetPrimary(true)
 	header.PackEnd(&mb.Widget)
 
-	sys := group("This system")
+	sys := group("This System")
 	for i, t := range []string{"Name", "Version", "Image", "Kernel", "Architecture", "State", "Image ref", "Tag", "Digest", "CPU", "GPU", "GNOME"} {
 		r := adw.NewActionRow()
 		r.SetTitle(t)
@@ -382,33 +401,44 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	u.health.AddCssClass("boxed-list")
 	hg.Add(&u.health.Widget)
 
-	help := group("Get help")
+	help := group("Get Help")
 	u.helpGroup = help
-	btns := gtk.NewFlowBox() // two pills side by side, stacked when narrow
-	btns.SetSelectionMode(gtk.SelectionNoneValue)
-	btns.SetMaxChildrenPerLine(2)
-	btns.SetColumnSpacing(12)
-	btns.SetRowSpacing(12)
+	btns := adw.NewWrapBox() // two pills side by side, stacked when narrow; unlike GtkFlowBox, not a focus container
+	btns.SetChildSpacing(12)
+	btns.SetLineSpacing(12)
 	btns.SetHalign(gtk.AlignCenterValue)
-	btns.Append(&pill("Report a Problem", func() { u.openCompose(publish.NewIssue) }).Widget)
-	btns.Append(&pill("Confirm Existing Issue", func() { u.openCompose(publish.Confirm) }).Widget)
+	btns.SetAlign(0.5)
+	report := pill("Report a Problem", func() { u.openCompose(publish.NewIssue) })
+	report.AddCssClass("suggested-action")
+	confirm := pill("Confirm Existing Issue", func() { u.openCompose(publish.Confirm) })
+	same := gtk.NewSizeGroup(gtk.SizeGroupHorizontalValue) // HIG: adjacent buttons share a width
+	same.AddWidget(&report.Widget)
+	same.AddWidget(&confirm.Widget)
+	btns.Append(&report.Widget)
+	btns.Append(&confirm.Widget)
 	help.Add(&btns.Widget)
 	btns.SetSensitive(false) // until a snapshot tells us which repo this image reports to
 	u.helpBtns = btns
 
 	browse := adw.NewActionRow()
-	browse.SetTitle("Browse all metrics")
+	browse.SetTitle("Browse All Metrics")
 	browse.SetActivatable(true)
 	browse.AddSuffix(&gtk.NewImageFromIconName("go-next-symbolic").Widget)
 	browse.ConnectActivated(hold(func(adw.ActionRow) { u.nav.PushByTag("metrics") }))
+	dg := adw.NewPreferencesGroup() // unfinished reports belong next to the actions that create them
+	dg.SetVisible(false)
+	u.draftsGrp = dg
 	bg := adw.NewPreferencesGroup()
 	u.draftsRow = adw.NewActionRow()
+	u.draftsRow.SetTitle("Unfinished Reports")
 	u.draftsRow.SetActivatable(true)
 	u.draftsRow.AddPrefix(&gtk.NewImageFromIconName("document-edit-symbolic").Widget)
+	u.draftsCount = gtk.NewLabel("")
+	u.draftsCount.AddCssClass("dim-label")
+	u.draftsRow.AddSuffix(&u.draftsCount.Widget)
 	u.draftsRow.AddSuffix(&gtk.NewImageFromIconName("go-next-symbolic").Widget)
 	u.draftsRow.SetActionName("win.drafts")
-	u.draftsRow.SetVisible(false)
-	bg.Add(&u.draftsRow.Widget)
+	dg.Add(&u.draftsRow.Widget)
 	bg.Add(&browse.Widget)
 
 	u.spinner = adw.NewSpinner()
@@ -418,10 +448,12 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 
 	u.statusPage = adw.NewStatusPage()
 	u.statusPage.SetIconName("dialog-warning-symbolic")
+	u.statusPage.SetChild(&pill("Try Again", u.refresh).Widget)
 
 	u.ovStack = gtk.NewStack()
 	u.ovStack.AddNamed(&loading.Widget, "loading")
-	u.ovStack.AddNamed(scrolled(&sys.Widget, &hg.Widget, &help.Widget, &bg.Widget), "ready")
+	// Actions first so reporting never needs a scroll; the long property list goes last.
+	u.ovStack.AddNamed(scrolled(&help.Widget, &dg.Widget, &hg.Widget, &sys.Widget, &bg.Widget), "ready")
 	u.ovStack.AddNamed(&u.statusPage.Widget, "error")
 	return u.page(appName, "overview", header, &u.ovStack.Widget)
 }
@@ -464,7 +496,7 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 		u.snap = nil
 		if errors.Is(err, snapshot.ErrNotInstalled) {
 			u.statusPage.SetTitle("System reports are unavailable")
-			u.statusPage.SetDescription(snapshot.Binary + " was not found. This system needs systemd 261 or newer with systemd-report.")
+			u.statusPage.SetDescription(snapshot.Binary + " was not found. This system needs systemd 261 or newer with systemd-report")
 		} else {
 			u.statusPage.SetTitle("Couldn't collect a report")
 			u.statusPage.SetDescription(err.Error())
@@ -477,9 +509,9 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	u.repoName = publish.Route(u.sum.ImageID)
 	u.helpBtns.SetSensitive(u.repoName != "")
 	if u.repoName == "" {
-		u.helpGroup.SetDescription("Reporting isn't available for this image (" + u.sum.ImageID + "). Only Dakota and Utah accept reports.")
+		u.helpGroup.SetDescription("Reporting isn't available for this image (" + u.sum.ImageID + "). Only Dakota and Utah accept reports")
 	} else {
-		u.helpGroup.SetDescription("Reports go to " + u.repoName + ", the repository for the image this system runs.")
+		u.helpGroup.SetDescription("Reports go to " + u.repoName + ", the repository for the image this system runs")
 	}
 	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState,
 		u.ident.Ref, u.ident.Tag, u.ident.Digest, u.ident.CPU, u.ident.GPU, u.ident.GNOME} {
@@ -494,7 +526,6 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 		r := adw.NewActionRow()
 		r.SetTitle(title)
 		r.SetSubtitle(sub)
-		r.SetTitleSelectable(true)
 		r.AddPrefix(&gtk.NewImageFromIconName(icon).Widget)
 		u.health.Append(&r.Widget)
 	}
@@ -510,7 +541,7 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 		}
 	}
 	if len(u.sum.FailedUnits)+len(u.sum.Warnings) == 0 {
-		add("No problems found", "No failed units or warnings", "emblem-ok-symbolic")
+		add("No problems found", "No failed units or warnings", "object-select-symbolic")
 	}
 
 	rows := make([]string, 0, len(s.System.Metrics)+len(s.User.Metrics))
@@ -565,7 +596,7 @@ func (u *ui) buildMetrics() {
 		}
 		row.Append(&box.Widget)
 		copy := gtk.NewButtonFromIconName("edit-copy-symbolic")
-		copy.SetTooltipText("Copy metric value")
+		copy.SetTooltipText("Copy Metric Value")
 		copy.SetValign(gtk.AlignCenterValue)
 		copy.AddCssClass("flat")
 		copy.SetActionName("win.copy-metric")
@@ -584,9 +615,10 @@ func (u *ui) buildMetrics() {
 		gtk.ButtonNewFromInternalPtr(row.GetLastChild().GoPointer()).SetActionTargetValue(glib.NewVariantString(val))
 	}))
 	lv := gtk.NewListView(gtk.NewNoSelection(model), &f.ListItemFactory)
-	lv.AddCssClass("navigation-sidebar")
+	clamp := adw.NewClampScrollable() // same max width as the other pages
+	clamp.SetChild(&lv.Widget)
 	sw := gtk.NewScrolledWindow()
-	sw.SetChild(&lv.Widget)
+	sw.SetChild(&clamp.Widget)
 	sw.SetVexpand(true)
 
 	empty := adw.NewStatusPage()
@@ -610,6 +642,7 @@ func (u *ui) buildMetrics() {
 	search := gtk.NewSearchEntry()
 	u.search = search
 	search.SetPlaceholderText("Filter metrics")
+	a11yLabel(&search.Widget, "Filter metrics") // a placeholder is not an accessible name
 	search.ConnectSearchChanged(hold(func(gtk.SearchEntry) {
 		u.filter.SetSearch(search.GetText())
 		u.syncResults()
@@ -620,7 +653,9 @@ func (u *ui) buildMetrics() {
 	search.SetMarginEnd(12)
 
 	box := gtk.NewBox(gtk.OrientationVerticalValue, 0)
-	box.Append(&search.Widget)
+	sclamp := adw.NewClamp()
+	sclamp.SetChild(&search.Widget)
+	box.Append(&sclamp.Widget)
 	box.Append(&results.Widget)
 	u.syncResults()
 	u.nav.Add(u.page("Metrics", "metrics", nil, &box.Widget))
@@ -630,9 +665,9 @@ func (u *ui) buildMetrics() {
 // a non-matching query so a retained search never hides a failed collection.
 func emptyState(total uint32, query string) (title, desc string) {
 	if total > 0 && query != "" {
-		return "No Results Found", "Try a different search or clear the filter."
+		return "No Results Found", "Try a different search or clear the filter"
 	}
-	return "No Metrics Available", "Refresh the snapshot and check the Overview for collection warnings."
+	return "No Metrics Available", "Refresh the snapshot and check the Overview for collection warnings"
 }
 
 // ---------- Compose ----------
@@ -641,6 +676,7 @@ func (u *ui) buildCompose() {
 	g := adw.NewPreferencesGroup()
 	u.repo = adw.NewActionRow()
 	u.repo.SetTitle("Project")
+	u.repo.AddCssClass("property")
 	u.repo.SetSubtitleSelectable(true)
 	g.Add(&u.repo.Widget)
 	sync := hold(func(gobject.Object, uintptr) { u.syncReview() })
@@ -663,10 +699,11 @@ func (u *ui) buildCompose() {
 	u.refErr.SetVisible(false)
 	g.Add(&u.refErr.Widget) // not a row: AdwPreferencesGroup places it below the list
 
-	dg := group("What happened?")
+	dg := group("What Happened?")
 	u.descGroup = dg
 	u.desc = gtk.NewTextBuffer(nil)
 	tv := gtk.NewTextViewWithBuffer(u.desc)
+	u.descView = tv
 	tv.SetWrapMode(gtk.WrapWordCharValue)
 	tv.SetTopMargin(12)
 	tv.SetBottomMargin(12)
@@ -674,9 +711,10 @@ func (u *ui) buildCompose() {
 	tv.SetRightMargin(12)
 	tv.SetSizeRequest(-1, 160)
 	tv.AddCssClass("card")
+	tv.SetAcceptsTab(false) // Tab moves focus, as in every other form field
 	dg.Add(&tv.Widget)
 
-	stepsGroup := group("Steps to reproduce (optional)")
+	stepsGroup := group("Steps to Reproduce (Optional)")
 	u.steps = gtk.NewTextBuffer(nil)
 	stv := gtk.NewTextViewWithBuffer(u.steps)
 	stv.SetWrapMode(gtk.WrapWordCharValue)
@@ -686,16 +724,18 @@ func (u *ui) buildCompose() {
 	stv.SetRightMargin(12)
 	stv.SetSizeRequest(-1, 120)
 	stv.AddCssClass("card")
+	stv.SetAcceptsTab(false)
+	a11yLabel(&stv.Widget, "Steps to reproduce")
 	stepsGroup.Add(&stv.Widget)
 
 	og := group("Options")
 	u.attach = adw.NewSwitchRow()
-	u.attach.SetTitle("Attach system report")
+	u.attach.SetTitle("Attach System Report")
 	u.attach.SetSubtitle("Reviewed before anything is sent")
 	u.attach.SetActive(true)
 	og.Add(&u.attach.Widget)
 	u.includeUser = adw.NewSwitchRow()
-	u.includeUser.SetTitle("Include user session")
+	u.includeUser.SetTitle("Include User Session")
 	og.Add(&u.includeUser.Widget)
 	u.queue = adw.NewComboRow()
 	u.queue.SetTitle("Who should look at it")
@@ -706,7 +746,7 @@ func (u *ui) buildCompose() {
 	u.area.SetModel(gtk.NewStringList([]string{"Not sure", "Desktop", "Flatpak apps", "Gaming", "Hardware", "Installer", "Developer tools"}))
 	og.Add(&u.area.Widget)
 
-	xg := group("Include diagnostics")
+	xg := group("Include Diagnostics")
 	xg.SetDescription("Off by default. Scrubbed like the report and shown in Review before anything is sent")
 	for _, s := range extras.Sections {
 		r := adw.NewSwitchRow()
@@ -716,11 +756,10 @@ func (u *ui) buildCompose() {
 	}
 
 	sg := group("Screenshots")
-	sg.SetDescription("Public. Metadata is stripped by re-encoding. PNG, JPEG or GIF; up to 10 files, 10 MiB each")
+	sg.SetDescription("Public. Metadata is stripped by re-encoding. PNG, JPEG or GIF; up to 10 files, 10 MB each")
 	u.shotList = gtk.NewListBox()
 	u.shotList.SetSelectionMode(gtk.SelectionNoneValue)
 	u.shotList.AddCssClass("boxed-list")
-	u.shotList.SetVisible(false)
 	sg.Add(&u.shotList.Widget)
 	filter := gtk.NewFileFilter()
 	filter.SetName("Images")
@@ -748,18 +787,25 @@ func (u *ui) buildCompose() {
 		}
 		u.syncShots()
 	}))
-	add := pill("Add Screenshots…", func() { u.shotDialog.OpenMultiple(&u.win.Window, nil, picked, 0) })
-	add.SetHalign(gtk.AlignStartValue)
-	add.SetMarginTop(12)
-	sg.Add(&add.Widget) // not a row: placed below the list
+	u.addShot = adw.NewButtonRow() // HIG: add button row at the end of an editable list
+	u.addShot.Ref()                // syncShots re-appends it after RemoveAll
+	u.addShot.SetTitle("Add Screenshots…")
+	u.addShot.SetStartIconName("list-add-symbolic")
+	u.addShot.ConnectActivated(hold(func(adw.ButtonRow) { u.shotDialog.OpenMultiple(&u.win.Window, nil, picked, 0) }))
+	u.shotList.Append(&u.addShot.Widget)
 
 	u.reviewBtn = pill("Review", u.openReview)
 	u.reviewBtn.AddCssClass("suggested-action")
 	u.reviewBtn.SetHalign(gtk.AlignCenterValue)
+	u.reviewBtn.SetMarginTop(6)
+	u.reviewBtn.SetMarginBottom(6)
 	u.reviewBtn.SetSensitive(false)
 
 	u.newOnly = []*gtk.Widget{&u.title.Widget, &u.queue.Widget, &u.area.Widget, &stepsGroup.Widget}
-	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &stepsGroup.Widget, &og.Widget, &xg.Widget, &sg.Widget, &u.reviewBtn.Widget))
+	tv2 := u.toolbar(nil, scrolled(&g.Widget, &dg.Widget, &stepsGroup.Widget, &og.Widget, &xg.Widget, &sg.Widget))
+	tv2.AddBottomBar(&u.reviewBtn.Widget) // like Review's Publish: always visible, never scrolled away
+	u.composePage = adw.NewNavigationPage(&tv2.Widget, "New Issue")
+	u.composePage.SetTag("compose")
 	u.nav.Add(u.composePage)
 }
 
@@ -779,7 +825,7 @@ func (u *ui) syncShots() {
 		r.AddSuffix(&b.Widget)
 		u.shotList.Append(&r.Widget)
 	}
-	u.shotList.SetVisible(len(u.shots) > 0)
+	u.shotList.Append(&u.addShot.Widget)
 	if u.consentIssue != nil { // shots changed: Review consent no longer covers them
 		u.consentIssue.SetActive(false)
 		u.consentReport.SetActive(false)
@@ -799,57 +845,73 @@ func (u *ui) syncReview() {
 		_, err := publish.ParseIssueRef(u.repoName, ref)
 		ok = err == nil
 		if err != nil && ref != "" {
-			msg = err.Error()
+			msg = "Enter an issue number or a link to an issue in " + u.repoName
 		}
 	}
 	u.refErr.SetText(msg)
 	u.refErr.SetVisible(msg != "")
+	if msg != "" {
+		u.issueRef.AddCssClass("error")
+	} else {
+		u.issueRef.RemoveCssClass("error")
+	}
 	u.reviewBtn.SetSensitive(u.snap != nil && ok)
 }
 
+// openCompose shows the form for m. A half-written report survives Back or
+// Escape; only switching modes (or publishing it) starts a fresh one.
 func (u *ui) openCompose(m publish.Mode) {
+	if m != u.mode {
+		u.resetCompose()
+	}
 	u.mode = m
 	newIssue := m == publish.NewIssue
 	for _, w := range u.newOnly {
 		w.SetVisible(newIssue)
 	}
 	u.issueRef.SetVisible(!newIssue)
-	u.attach.SetActive(true)
-	if newIssue {
-		u.descGroup.SetTitle("What happened?")
-	} else {
-		u.descGroup.SetTitle("What you're seeing (optional)")
+	desc, page := "What Happened?", "New Issue"
+	if !newIssue {
+		desc, page = "What You’re Seeing (Optional)", "Confirm Existing Issue"
 	}
-	u.title.SetText("")
-	u.issueRef.SetText("")
-	u.desc.SetText("", -1)
-	u.steps.SetText("", -1)
-	for _, r := range u.optIn {
-		r.SetActive(false)
-	}
-	u.shots = nil
-	u.syncShots()
-	if newIssue {
-		u.composePage.SetTitle("Report a Problem")
-	} else {
-		u.composePage.SetTitle("Confirm Existing Issue")
-	}
+	u.descGroup.SetTitle(desc)
+	a11yLabel(&u.descView.Widget, desc)
+	u.composePage.SetTitle(page)
 	u.repo.SetSubtitle(u.repoName)
 	u.syncReview()
 	u.nav.PushByTag("compose")
 }
 
+// resetCompose empties the Compose form to its defaults.
+func (u *ui) resetCompose() {
+	u.title.SetText("")
+	u.issueRef.SetText("")
+	u.desc.SetText("", -1)
+	u.steps.SetText("", -1)
+	u.attach.SetActive(true)
+	u.includeUser.SetActive(false)
+	u.queue.SetSelected(0)
+	u.area.SetSelected(0)
+	for _, r := range u.optIn {
+		r.SetActive(false)
+	}
+	u.shots = nil
+	u.syncShots()
+}
+
 // ---------- Review ----------
 
-func monoView(buf *gtk.TextBuffer, editable bool) *gtk.Widget {
+func monoView(buf *gtk.TextBuffer, editable bool, label string) *gtk.Widget {
 	tv := gtk.NewTextViewWithBuffer(buf)
 	tv.SetMonospace(true)
 	tv.SetEditable(editable)
+	tv.SetAcceptsTab(false) // Tab moves focus instead of inserting a tab
 	tv.SetWrapMode(gtk.WrapWordCharValue)
 	tv.SetTopMargin(12)
 	tv.SetBottomMargin(12)
 	tv.SetLeftMargin(12)
 	tv.SetRightMargin(12)
+	a11yLabel(&tv.Widget, label)
 	sw := gtk.NewScrolledWindow()
 	sw.SetChild(&tv.Widget)
 	sw.SetVexpand(true)
@@ -870,19 +932,20 @@ func (u *ui) buildReview() {
 	u.removed.AddCssClass("boxed-list")
 
 	stack := adw.NewViewStack()
-	stack.AddTitledWithIcon(monoView(u.issueText, true), "issue", "Issue text", "document-edit-symbolic")
-	stack.AddTitledWithIcon(monoView(u.attachText, false), "attachment", "Attachment", "mail-attachment-symbolic")
-	rg := group("What was removed")
+	stack.AddTitledWithIcon(monoView(u.issueText, true, "Issue text"), "issue", "Issue Text", "document-edit-symbolic")
+	stack.AddTitledWithIcon(monoView(u.attachText, false, "Attachment"), "attachment", "Attachment", "mail-attachment-symbolic")
+	rg := group("What Was Removed")
 	rg.SetDescription("Values scrubbed or dropped before sharing")
 	rg.Add(&u.removed.Widget)
-	stack.AddTitledWithIcon(scrolled(&rg.Widget), "removed", "Removed", "edit-clear-symbolic")
+	rsw := gtk.NewScrolledWindow() // not scrolled(): the page is already clamped and padded
+	rsw.SetChild(&rg.Widget)
+	stack.AddTitledWithIcon(&rsw.Widget, "removed", "Removed", "edit-clear-symbolic")
 	stack.SetSizeRequest(-1, 280) // outer scroll keeps Consent reachable at 360×294
 
-	header := adw.NewHeaderBar()
-	sw := adw.NewViewSwitcher()
+	// Inline, not in the header: it switches only this panel, and the header keeps the page title.
+	sw := adw.NewInlineViewSwitcher()
 	sw.SetStack(stack)
-	sw.SetPolicy(adw.ViewSwitcherPolicyNarrowValue) // fits 360 px
-	header.SetTitleWidget(&sw.Widget)
+	sw.SetHalign(gtk.AlignCenterValue)
 
 	u.shotsGroup = group("Attachments")
 	u.consentGroup = group("Consent")
@@ -907,7 +970,7 @@ func (u *ui) buildReview() {
 		}
 		path := f.GetPath()
 		if err := os.WriteFile(path, u.payload.JSON, 0o600); err != nil {
-			u.showError("Export failed: " + err.Error())
+			u.showError("Couldn't Export Report", err.Error())
 			return
 		}
 		log.Printf("ui: exported %d bytes to %s", len(u.payload.JSON), path)
@@ -919,7 +982,7 @@ func (u *ui) buildReview() {
 	})
 	u.publishBtn = pill("Publish", u.publish)
 	u.publishBtn.AddCssClass("suggested-action")
-	btns := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+	btns := gtk.NewBox(gtk.OrientationHorizontalValue, 12) // not homogeneous: two Export-width pills overflow 360 px
 	btns.SetHalign(gtk.AlignCenterValue)
 	btns.Append(&export.Widget)
 	btns.Append(&u.publishBtn.Widget)
@@ -927,7 +990,7 @@ func (u *ui) buildReview() {
 	btns.SetMarginTop(6)
 	btns.SetMarginBottom(6)
 
-	tv := u.toolbar(header, scrolled(&stack.Widget, &u.shotsGroup.Widget, &cg.Widget))
+	tv := u.toolbar(nil, scrolled(&sw.Widget, &stack.Widget, &u.shotsGroup.Widget, &cg.Widget))
 	tv.AddBottomBar(&btns.Widget)
 	p := adw.NewNavigationPage(&tv.Widget, "Review")
 	p.SetTag("review")
@@ -987,7 +1050,7 @@ func (u *ui) showReview(vals map[string]string) {
 	// Synchronous on purpose: measured ~40 ms (9.5k metrics, 725 KB payload) on a dev host.
 	p, err := privacy.Build(*u.snap, privacy.Options{Username: name, IncludeUser: u.includeUser.GetActive(), Extras: vals})
 	if err != nil {
-		u.showError("Couldn't prepare the report: " + err.Error())
+		u.showError("Couldn't Prepare Report", err.Error())
 		return
 	}
 	u.payload = p
@@ -1095,7 +1158,7 @@ func (u *ui) publish() {
 	}
 	d.Screenshots = slices.Clone(u.shots)
 	log.Printf("ui: publishing %s to %s (mode %d, %d attachment bytes, %d screenshots)", d.ReportID, d.Repo, d.Mode, len(d.Attachment), len(d.Screenshots))
-	u.run(func() { u.publish() }, func(ctx context.Context, gh publish.Exec) (publish.Result, error) {
+	u.run(d.ReportID, func() { u.publish() }, func(ctx context.Context, gh publish.Exec) (publish.Result, error) {
 		return publish.Submit(ctx, gh, u.stateDir, d)
 	})
 }
@@ -1105,13 +1168,13 @@ func (u *ui) resume(id string) {
 		return
 	}
 	log.Printf("ui: resuming %s", id)
-	u.run(func() { u.resume(id) }, func(ctx context.Context, gh publish.Exec) (publish.Result, error) {
+	u.run(id, func() { u.resume(id) }, func(ctx context.Context, gh publish.Exec) (publish.Result, error) {
 		return publish.Resume(ctx, gh, u.stateDir, id)
 	})
 }
 
-// run does one publish step off the main thread; retry repeats it after sign-in.
-func (u *ui) run(retry func(), step func(context.Context, publish.Exec) (publish.Result, error)) {
+// run does one publish step for report id off the main thread; retry repeats it after sign-in.
+func (u *ui) run(id string, retry func(), step func(context.Context, publish.Exec) (publish.Result, error)) {
 	gh := publish.Exec(publish.RunGH)
 	if u.dryRun {
 		gh = fakeGH
@@ -1132,21 +1195,36 @@ func (u *ui) run(retry func(), step func(context.Context, publish.Exec) (publish
 				u.signInDlg.Present(&u.win.Widget)
 			case errors.Is(err, publish.ErrDraftChanged):
 				u.refreshDrafts()
-				u.showError("Publishing failed: " + err.Error())
+				u.showError("Couldn't Publish Report", err.Error())
 			case err != nil:
 				u.refreshDrafts()
-				u.showError("Publishing failed: " + err.Error() + "\n\nYour draft was kept; resume it from Drafts.")
+				body := err.Error()
+				if u.resumable(id) {
+					body += "\n\nYour draft was kept. Resume it from Drafts."
+				}
+				u.showError("Couldn't Publish Report", body)
 			default:
 				u.refreshDrafts()
 				u.doneURL = res.IssueURL
 				u.donePage.SetDescription(res.IssueURL)
-				u.title.SetText("")
-				u.issueRef.SetText("")
-				u.desc.SetText("", -1)
+				if id == u.reportID { // the Compose report, not some other resumed draft
+					u.resetCompose()
+				}
 				u.nav.ReplaceWithTags([]string{"overview", "done"}, 2) // Back from Done goes home, not to Publish
 			}
 		})
 	}()
+}
+
+// resumable reports whether Drafts holds report id in a form Resume can still publish.
+func (u *ui) resumable(id string) bool {
+	ds, _ := publish.Pending(u.stateDir)
+	for _, s := range ds {
+		if s.ReportID == id {
+			return slices.Contains(publish.Repos, s.Draft.Repo)
+		}
+	}
+	return false
 }
 
 // ---------- Drafts ----------
@@ -1155,15 +1233,22 @@ func (u *ui) buildDrafts() {
 	u.draftList = gtk.NewListBox()
 	u.draftList.SetSelectionMode(gtk.SelectionNoneValue)
 	u.draftList.AddCssClass("boxed-list")
-	g := group("Unfinished reports")
-	g.SetDescription("Discarding only deletes the local copy, never anything already on GitHub.")
+	g := group("Unfinished Reports")
+	g.SetDescription("Discarding only deletes the local copy, never anything already on GitHub")
 	g.Add(&u.draftList.Widget)
-	u.nav.Add(u.page("Drafts", "drafts", nil, scrolled(&g.Widget)))
+	empty := adw.NewStatusPage()
+	empty.SetIconName("document-edit-symbolic")
+	empty.SetTitle("No Unfinished Reports")
+	empty.SetDescription("Reports that couldn't be published appear here")
+	u.draftsStack = gtk.NewStack()
+	u.draftsStack.AddNamed(scrolled(&g.Widget), "list")
+	u.draftsStack.AddNamed(&empty.Widget, "empty")
+	u.nav.Add(u.page("Drafts", "drafts", nil, &u.draftsStack.Widget))
 
-	u.discardDlg = adw.NewAlertDialog("Discard draft?", "The local copy is deleted. Anything already published stays on GitHub.")
+	u.discardDlg = adw.NewAlertDialog("Discard Draft?", "The local copy is deleted. Anything already published stays on GitHub.")
 	u.discardDlg.Ref() // reused: keep it alive between presentations
-	u.discardDlg.AddResponse("cancel", "Cancel")
-	u.discardDlg.AddResponse("discard", "Discard")
+	u.discardDlg.AddResponse("cancel", "_Cancel")
+	u.discardDlg.AddResponse("discard", "_Discard")
 	u.discardDlg.SetResponseAppearance("discard", adw.ResponseDestructiveValue)
 	u.discardDlg.SetCloseResponse("cancel")
 	u.discardDlg.ConnectResponse(hold(func(_ adw.AlertDialog, r string) {
@@ -1172,7 +1257,7 @@ func (u *ui) buildDrafts() {
 		}
 		log.Printf("ui: discarding draft %s", u.discardID)
 		if err := publish.Discard(u.stateDir, u.discardID); err != nil {
-			u.showError("Couldn't discard: " + err.Error())
+			u.showError("Couldn't Discard Draft", err.Error())
 		}
 		u.refreshDrafts()
 		u.toast("Draft discarded")
@@ -1186,28 +1271,30 @@ func (u *ui) refreshDrafts() {
 		log.Print("ui: drafts: ", err)
 	}
 	log.Printf("ui: %d unfinished drafts", len(ds))
-	u.draftsRow.SetTitle(fmt.Sprintf("Unfinished reports (%d)", len(ds)))
-	u.draftsRow.SetVisible(len(ds) > 0)
+	u.draftsCount.SetText(fmt.Sprint(len(ds)))
+	u.draftsGrp.SetVisible(len(ds) > 0)
 	u.draftList.RemoveAll()
 	for _, s := range ds {
 		r := adw.NewActionRow()
 		t := s.Draft.Title
 		if t == "" {
-			t = "Comment on " + s.Draft.IssueRef
+			t = "Comment on #" + s.Draft.IssueRef
 		}
 		r.SetTitle(t)
-		r.SetSubtitle(s.Draft.Repo + " · " + string(s.Stage))
-		btn := func(icon, tip, act string) {
-			b := gtk.NewButtonFromIconName(icon)
-			b.SetTooltipText(tip)
-			b.SetValign(gtk.AlignCenterValue)
-			b.AddCssClass("flat")
-			b.SetActionName(act)
-			b.SetActionTargetValue(glib.NewVariantString(s.ReportID))
-			r.AddSuffix(&b.Widget)
-		}
-		btn("media-playback-start-symbolic", "Resume", "win.draft-resume")
-		btn("user-trash-symbolic", "Discard", "win.draft-discard")
+		r.SetSubtitle(s.Draft.Repo + " · " + stageText(s))
+		resume := gtk.NewButtonWithLabel("Resume")
+		resume.SetValign(gtk.AlignCenterValue)
+		resume.AddCssClass("flat")
+		resume.SetActionName("win.draft-resume")
+		resume.SetActionTargetValue(glib.NewVariantString(s.ReportID))
+		r.AddSuffix(&resume.Widget)
+		discard := gtk.NewButtonFromIconName("user-trash-symbolic")
+		discard.SetTooltipText("Discard")
+		discard.SetValign(gtk.AlignCenterValue)
+		discard.AddCssClass("flat")
+		discard.SetActionName("win.draft-discard")
+		discard.SetActionTargetValue(glib.NewVariantString(s.ReportID))
+		r.AddSuffix(&discard.Widget)
 		u.draftList.Append(&r.Widget)
 	}
 	if err != nil { // the readable drafts are still listed above
@@ -1219,20 +1306,32 @@ func (u *ui) refreshDrafts() {
 		u.draftList.Append(&r.Widget)
 	}
 	if len(ds) == 0 && err == nil {
-		r := adw.NewActionRow()
-		r.SetTitle("No unfinished reports")
-		u.draftList.Append(&r.Widget)
+		u.draftsStack.SetVisibleChildName("empty")
+	} else {
+		u.draftsStack.SetVisibleChildName("list")
 	}
+}
+
+// stageText describes a draft's publish stage in plain words.
+func stageText(s publish.Saved) string {
+	switch {
+	case s.Stage == publish.Reviewed:
+		return "Not published yet"
+	case s.IssueURL != "":
+		return "Partly published"
+	}
+	return "Interrupted while publishing"
 }
 
 // ---------- Sign-in ----------
 
 func (u *ui) buildSignIn() {
-	u.signInDlg = adw.NewAlertDialog("Sign in to GitHub",
-		"Publishing needs a GitHub account. Your browser opens to approve the GitHub CLI; your draft is kept.")
+	u.signInDlg = adw.NewAlertDialog("Sign In to GitHub",
+		"Publishing needs a GitHub account. Sign in with a one-time code in your browser; your draft is kept.")
 	u.signInDlg.Ref()
-	u.signInDlg.AddResponse("cancel", "Cancel")
-	u.signInDlg.AddResponse("signin", "Sign In")
+	u.signInDlg.AddResponse("cancel", "_Cancel")
+	u.signInDlg.AddResponse("signin", "_Sign In")
+	u.signInDlg.SetDefaultResponse("signin")
 	u.signInDlg.SetResponseAppearance("signin", adw.ResponseSuggestedValue)
 	u.signInDlg.SetCloseResponse("cancel")
 	u.signInDlg.ConnectResponse(hold(func(_ adw.AlertDialog, r string) {
@@ -1244,30 +1343,31 @@ func (u *ui) buildSignIn() {
 	u.codeLabel = gtk.NewLabel("…")
 	u.codeLabel.AddCssClass("title-1")
 	u.codeLabel.SetSelectable(true)
-	cp := pill("Copy Code", func() {
+	cp := gtk.NewButtonFromIconName("edit-copy-symbolic")
+	cp.SetTooltipText("Copy Code")
+	cp.SetValign(gtk.AlignCenterValue)
+	cp.AddCssClass("flat")
+	cp.ConnectClicked(hold(func(gtk.Button) {
 		u.win.GetClipboard().SetText(u.codeLabel.GetText())
 		u.toast("Code copied")
-	})
+	}))
+	code := gtk.NewBox(gtk.OrientationHorizontalValue, 6)
+	code.SetHalign(gtk.AlignCenterValue)
+	code.Append(&u.codeLabel.Widget)
+	code.Append(&cp.Widget)
 	open := pill("Open Browser", func() {
 		gtk.NewUriLauncher(u.codeURL).Launch(&u.win.Window, nil, nil, 0)
 	})
 	open.AddCssClass("suggested-action")
-	btns := gtk.NewFlowBox()
-	btns.SetSelectionMode(gtk.SelectionNoneValue)
-	btns.SetMaxChildrenPerLine(2)
-	btns.SetColumnSpacing(12)
-	btns.SetRowSpacing(12)
-	btns.SetHalign(gtk.AlignCenterValue)
-	btns.Append(&cp.Widget)
-	btns.Append(&open.Widget)
+	open.SetHalign(gtk.AlignCenterValue)
 	box := gtk.NewBox(gtk.OrientationVerticalValue, 12)
-	box.Append(&u.codeLabel.Widget)
-	box.Append(&btns.Widget)
+	box.Append(&code.Widget)
+	box.Append(&open.Widget)
 
 	u.codeDlg = adw.NewAlertDialog("Enter this code on GitHub", "Copy the code, open the browser, and paste it there. This closes by itself once GitHub confirms.")
 	u.codeDlg.Ref()
 	u.codeDlg.SetExtraChild(&box.Widget)
-	u.codeDlg.AddResponse("cancel", "Cancel")
+	u.codeDlg.AddResponse("cancel", "_Cancel")
 	u.codeDlg.SetCloseResponse("cancel")
 	u.codeDlg.ConnectResponse(hold(func(adw.AlertDialog, string) {
 		if u.signCancel != nil {
@@ -1302,7 +1402,7 @@ func (u *ui) signIn() {
 			log.Printf("ui: sign-in finished: err=%v", err)
 			if err != nil {
 				if ctx.Err() == nil { // not cancelled by the user
-					u.showError("Sign-in failed: " + err.Error())
+					u.showError("Couldn't Sign In", err.Error())
 				}
 				return
 			}
@@ -1322,7 +1422,7 @@ func (u *ui) shortcuts() {
 		{"Refresh snapshot", "<Control>r F5"},
 		{"Search metrics", "<Control>f"},
 		{"Back", "<Alt>Left Escape"},
-		{"Advance (Compose → Review → Publish)", "<Control>Return"},
+		{"Continue to Review or Publish", "<Control>Return"},
 		{"Keyboard shortcuts", "<Control>question"},
 		{"Help", "F1"},
 		{"Close window", "<Control>w"},
@@ -1368,7 +1468,7 @@ func fakeGHStream(_ context.Context, _ []byte, onLine func(string), args ...stri
 
 func (u *ui) buildDone() {
 	u.donePage = adw.NewStatusPage()
-	u.donePage.SetIconName("emblem-ok-symbolic")
+	u.donePage.SetIconName("object-select-symbolic") // emblem-ok-symbolic is gone from the Adwaita icon theme
 	u.donePage.SetTitle("Report published")
 	open := pill("Open Issue", func() {
 		gtk.NewUriLauncher(u.doneURL).Launch(&u.win.Window, nil, nil, 0)
@@ -1379,6 +1479,7 @@ func (u *ui) buildDone() {
 		u.toast("Link copied")
 	})
 	btns := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+	btns.SetHomogeneous(true) // HIG: adjacent buttons share a width
 	btns.SetHalign(gtk.AlignCenterValue)
 	btns.Append(&open.Widget)
 	btns.Append(&cp.Widget)
@@ -1393,6 +1494,7 @@ func (u *ui) about() {
 	a.SetDeveloperName("Project Bluefin")
 	a.SetVersion(Version)
 	a.SetWebsite("https://github.com/projectbluefin/bluefin-report")
+	a.SetIssueUrl("https://github.com/projectbluefin/bluefin-report/issues")
 	a.SetLicenseType(gtk.LicenseApache20Value)
 	a.Present(&u.win.Widget)
 }
@@ -1400,4 +1502,12 @@ func (u *ui) about() {
 func fileExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.Mode().IsRegular()
+}
+
+// a11yLabel names w for assistive technologies; a placeholder or a nearby heading is not a name.
+func a11yLabel(w *gtk.Widget, s string) {
+	var v gobject.Value
+	v.Init(gobject.TypeStringVal)
+	v.SetString(s)
+	w.UpdatePropertyValue(1, []gtk.AccessibleProperty{gtk.AccessiblePropertyLabelValue}, []gobject.Value{v})
 }
