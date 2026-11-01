@@ -3,7 +3,9 @@ package publish
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"image/png"
@@ -137,6 +139,241 @@ func TestSuccess(t *testing.T) {
 	}
 	if r2, err := Submit(context.Background(), f.exec, dir, d); err != nil || r2 != r || f.count(create) != 1 || f.count(artifact) != 1 {
 		t.Fatal("re-submit of a published report must return the stored result", r2, err, f.calls)
+	}
+}
+
+func TestSubmitRejectsChangedDraftOnRetry(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*Draft)
+	}{
+		{"body", func(d *Draft) { d.Body = "freshly reviewed body" }},
+		{"title", func(d *Draft) { d.Title = "freshly reviewed title" }},
+		{"repo", func(d *Draft) { d.Repo = "projectbluefin/utah" }},
+		{"mode", func(d *Draft) { d.Mode = Confirm }},
+		{"issue reference", func(d *Draft) { d.IssueRef = "4" }},
+		{"queue", func(d *Draft) { d.Queue = "another-queue" }},
+		{"area", func(d *Draft) { d.Area = "gaming" }},
+		{"removed area", func(d *Draft) { d.Area = "" }},
+		{"attachment", func(d *Draft) { d.Attachment = []byte(`{"reviewed":true}`) }},
+		{"removed attachment", func(d *Draft) { d.Attachment = nil }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, dir := newFake(), t.TempDir()
+			f.fail["issue create"] = true
+			d := draft
+			d.ReportID, d.IssueRef, d.Area = NewReportID(), "3", "desktop"
+			if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+				t.Fatal("want first issue write to fail")
+			}
+			path := filepath.Join(dir, d.ReportID, "state.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := len(f.calls)
+			remoteCalls := f.count("api") + f.count("gist") + f.count("issue")
+			f.fail["issue create"] = false
+			changed := d
+			tt.change(&changed)
+			if _, err := Submit(context.Background(), f.exec, dir, changed); err == nil {
+				t.Fatal("want draft mismatch error")
+			}
+			if f.count("api")+f.count("gist")+f.count("issue") != remoteCalls {
+				t.Fatal("changed retry must not look up or publish the saved payload", f.calls[calls:])
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("changed retry modified saved state", err)
+			}
+			// The unchanged consented draft can still resolve the uncertain issue
+			// write and attach its report through the current artifact workflow.
+			r, err := Submit(context.Background(), f.exec, dir, d)
+			if err != nil || r.IssueURL == "" || f.count("gist create") != 0 || f.count(create) != 2 || f.count(artifact) != 1 {
+				t.Fatal("unchanged retry failed", r, err, f.calls)
+			}
+		})
+	}
+}
+
+func TestSubmitRejectsChangedScreenshotsOnRetry(t *testing.T) {
+	for _, mode := range []Mode{NewIssue, Confirm} {
+		for _, name := range []string{"added", "removed", "reordered", "renamed", "replaced", "edited in place"} {
+			t.Run(fmt.Sprintf("%d/%s", mode, name), func(t *testing.T) {
+				f, dir := newFake(), t.TempDir()
+				d := draft
+				d.ReportID, d.Mode, d.IssueRef = NewReportID(), mode, "3"
+				d.Screenshots = shots(t, 2, ".png", 10)
+				f.fail["artifact create"] = true
+				if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+					t.Fatal("want artifact failure after the issue is known")
+				}
+				path := filepath.Join(dir, d.ReportID, "state.json")
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changed := d
+				changed.Screenshots = slices.Clone(d.Screenshots)
+				switch name {
+				case "added":
+					changed.Screenshots = append(changed.Screenshots, shots(t, 1, ".png", 10)...)
+				case "removed":
+					changed.Screenshots = changed.Screenshots[:1]
+				case "reordered":
+					slices.Reverse(changed.Screenshots)
+				case "renamed":
+					data, err := os.ReadFile(changed.Screenshots[0])
+					if err != nil {
+						t.Fatal(err)
+					}
+					changed.Screenshots[0] = filepath.Join(t.TempDir(), "renamed.png")
+					if err := os.WriteFile(changed.Screenshots[0], data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				case "replaced", "edited in place":
+					if name == "replaced" {
+						changed.Screenshots[0] = filepath.Join(t.TempDir(), "s.png")
+					}
+					var b bytes.Buffer
+					img := image.NewGray(image.Rect(0, 0, 2, 2))
+					if err := png.Encode(&b, img); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(changed.Screenshots[0], b.Bytes(), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				calls := len(f.calls)
+				if _, err := Submit(context.Background(), f.exec, dir, changed); err == nil {
+					t.Fatal("changed screenshots must not publish the saved payload")
+				}
+				if len(f.calls) != calls {
+					t.Fatal("changed retry caused remote work", f.calls[calls:])
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatal("changed retry modified saved state", err)
+				}
+				// Explicit Resume still uses the original, private draft copies.
+				f.fail["artifact create"] = false
+				if _, err := Resume(context.Background(), f.exec, dir, d.ReportID); err != nil {
+					t.Fatal("explicit resume failed", err, f.calls)
+				}
+				if f.count("issue artifact create") != 2 || f.count("issue comment") != 1 {
+					t.Fatal("resume duplicated or lost report uploads", f.calls)
+				}
+				if p, err := Pending(dir); err != nil || len(p) != 0 {
+					t.Fatal("resume did not publish", p, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSubmitRetriesUnchangedScreenshots(t *testing.T) {
+	for _, ext := range []string{".png", ".jpg", ".gif"} {
+		for _, savedPaths := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/saved=%t", ext, savedPaths), func(t *testing.T) {
+				f, dir := newFake(), t.TempDir()
+				d := draft
+				d.ReportID = NewReportID()
+				// Equal basenames exercise the same collision handling on retry.
+				d.Screenshots = append(shots(t, 1, ext, 10), shots(t, 1, ext, 10)...)
+				f.fail["artifact create"] = true
+				if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+					t.Fatal("want artifact failure")
+				}
+				if savedPaths {
+					s, err := load(filepath.Join(dir, d.ReportID, "state.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					d = s.Draft
+				}
+				f.fail["artifact create"] = false
+				r, err := Submit(context.Background(), f.exec, dir, d)
+				if err != nil || r.IssueURL == "" || f.count(create) != 1 || f.count("issue comment") != 1 {
+					t.Fatal("unchanged retry failed", r, err, f.calls)
+				}
+				// Published retries need neither originals nor the deleted draft copies.
+				for _, p := range d.Screenshots {
+					if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+						t.Fatal(err)
+					}
+				}
+				calls := len(f.calls)
+				if again, err := Submit(context.Background(), f.exec, dir, d); err != nil || again != r || len(f.calls) != calls {
+					t.Fatal("published retry was not idempotent", again, err, f.calls[calls:])
+				}
+			})
+		}
+	}
+}
+
+func TestSubmitDistinguishesMissingAndEmptyAttachment(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID, d.Attachment = NewReportID(), []byte{}
+	s := &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d}
+	if err := save(dir, s); err != nil {
+		t.Fatal(err)
+	}
+	d.Attachment = nil
+	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+		t.Fatal("removing an empty attachment must require explicit review")
+	}
+	if f.count("api")+f.count("gist")+f.count("issue") != 0 {
+		t.Fatal("attachment mismatch caused remote work", f.calls)
+	}
+}
+
+func TestSubmitPreservesCorruptState(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID = NewReportID()
+	reportDir := filepath.Join(dir, d.ReportID)
+	if err := os.MkdirAll(reportDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(reportDir, "state.json")
+	before := []byte(`{"ReportID":`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Submit(context.Background(), f.exec, dir, d)
+	var syntaxError *json.SyntaxError
+	if !errors.As(err, &syntaxError) {
+		t.Fatalf("want original corrupt-state error, got %v", err)
+	}
+	if f.count("api")+f.count("gist")+f.count("issue") != 0 {
+		t.Fatal("corrupt state caused remote work", f.calls)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("corrupt state was overwritten", err)
+	}
+}
+
+func TestSubmitPreservesUnreadableState(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID = NewReportID()
+	path := filepath.Join(dir, d.ReportID, "state.json")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Submit(context.Background(), f.exec, dir, d)
+	var pathError *os.PathError
+	if !errors.As(err, &pathError) || pathError.Op != "read" {
+		t.Fatalf("want original unreadable-state error, got %v", err)
+	}
+	if f.count("api")+f.count("gist")+f.count("issue") != 0 {
+		t.Fatal("unreadable state caused remote work", f.calls)
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatal("unreadable state was replaced", err)
 	}
 }
 

@@ -77,6 +77,35 @@ func checkScreenshots(paths []string) error {
 	return nil
 }
 
+// screenshotData prepares exactly the bytes and filename that will be uploaded.
+func screenshotData(p string) ([]byte, string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, "", err
+	}
+	img, _, err := image.Decode(f) // first frame only for GIF
+	f.Close()
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: not a readable image: %w", filepath.Base(p), err)
+	}
+	var b bytes.Buffer
+	if ext := strings.ToLower(filepath.Ext(p)); ext == ".jpg" || ext == ".jpeg" {
+		err = jpeg.Encode(&b, img, &jpeg.Options{Quality: 92})
+	} else {
+		p = strings.TrimSuffix(p, filepath.Ext(p)) + ".png"
+		err = png.Encode(&b, img)
+	}
+	return b.Bytes(), filepath.Base(p), err
+}
+
+func screenshotDestination(dir, name string, i int, previous []string) string {
+	dst := filepath.Join(dir, name)
+	if slices.Contains(previous, dst) {
+		dst = filepath.Join(dir, fmt.Sprintf("%d-%s", i, name))
+	}
+	return dst
+}
+
 // copyScreenshots re-encodes the files into dir (0600) so no EXIF/text metadata survives
 // and a resume survives the originals moving. Undecodable files are rejected.
 func copyScreenshots(dir string, paths []string) ([]string, error) {
@@ -88,35 +117,43 @@ func copyScreenshots(dir string, paths []string) ([]string, error) {
 	}
 	var out []string
 	for i, p := range paths {
-		f, err := os.Open(p)
+		data, name, err := screenshotData(p)
 		if err != nil {
 			return nil, err
 		}
-		img, _, err := image.Decode(f) // first frame only for GIF
-		f.Close()
-		if err != nil {
-			return nil, fmt.Errorf("%s: not a readable image: %w", filepath.Base(p), err)
-		}
-		var b bytes.Buffer
-		if ext := strings.ToLower(filepath.Ext(p)); ext == ".jpg" || ext == ".jpeg" {
-			err = jpeg.Encode(&b, img, &jpeg.Options{Quality: 92})
-		} else {
-			p = strings.TrimSuffix(p, filepath.Ext(p)) + ".png"
-			err = png.Encode(&b, img)
-		}
-		if err != nil {
-			return nil, err
-		}
-		dst := filepath.Join(dir, filepath.Base(p))
-		if slices.Contains(out, dst) {
-			dst = filepath.Join(dir, fmt.Sprintf("%d-%s", i, filepath.Base(p)))
-		}
-		if err := os.WriteFile(dst, b.Bytes(), 0o600); err != nil {
+		dst := screenshotDestination(dir, name, i, out)
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			return nil, err
 		}
 		out = append(out, dst)
 	}
 	return out, nil
+}
+
+// sameScreenshots compares the ordered upload names and bytes, not original paths:
+// saved drafts point at metadata-stripped copies, while Submit receives the originals.
+func sameScreenshots(saved, reviewed []string) (bool, error) {
+	if len(saved) != len(reviewed) {
+		return false, nil
+	}
+	for i, p := range reviewed {
+		want, err := os.ReadFile(saved[i])
+		if err != nil {
+			return false, err
+		}
+		if p == saved[i] {
+			continue // already the draft copy; do not lossy-encode a JPEG twice
+		}
+		got, name, err := screenshotData(p)
+		if err != nil {
+			return false, err
+		}
+		dst := screenshotDestination(filepath.Dir(saved[i]), name, i, saved[:i])
+		if dst != saved[i] || !bytes.Equal(want, got) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // attachArgs returns gh --attach flags for every screenshot.
@@ -285,9 +322,6 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	if !slices.Contains(Repos, d.Repo) {
 		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", d.Repo)
 	}
-	if err := checkScreenshots(d.Screenshots); err != nil {
-		return Result{}, err
-	}
 	if d.Mode == Confirm {
 		n, err := ParseIssueRef(d.Repo, d.IssueRef)
 		if err != nil {
@@ -295,25 +329,46 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 		}
 		d.IssueRef = strconv.Itoa(n) // stored normalized: run and lookup use it verbatim
 	}
-	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
-		return Result{}, ErrNotSignedIn
-	}
 	if d.ReportID == "" {
 		d.ReportID = NewReportID()
 	}
-	// Same report submitted again (retry after a failure): continue it, never start over.
-	if s, err := load(filepath.Join(stateDir, d.ReportID, "state.json")); err == nil {
-		if s.Stage == Published {
-			return Result{IssueURL: s.IssueURL, GistURL: s.GistURL}, nil
+	s, err := load(filepath.Join(stateDir, d.ReportID, "state.json"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Result{}, err
+	}
+	if err == nil && s.Stage == Published {
+		return Result{IssueURL: s.IssueURL, GistURL: s.GistURL}, nil
+	}
+	if err := checkScreenshots(d.Screenshots); err != nil {
+		return Result{}, err
+	}
+	// Same report submitted again: only resume the payload that was reviewed.
+	if s != nil {
+		saved := s.Draft
+		same := saved.ReportID == d.ReportID && saved.Mode == d.Mode && saved.Repo == d.Repo &&
+			saved.Title == d.Title && saved.Body == d.Body && saved.IssueRef == d.IssueRef &&
+			saved.Queue == d.Queue && saved.Area == d.Area &&
+			(saved.Attachment == nil) == (d.Attachment == nil) && bytes.Equal(saved.Attachment, d.Attachment)
+		if same {
+			same, err = sameScreenshots(saved.Screenshots, d.Screenshots)
+			if err != nil {
+				return Result{}, err
+			}
+		}
+		if !same {
+			return Result{}, fmt.Errorf("report %s differs from its saved draft; the changed report was not published. Resume the unchanged saved version from Drafts, or start a new report for these edits", d.ReportID)
 		}
 		return Resume(ctx, gh, stateDir, d.ReportID)
+	}
+	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
+		return Result{}, ErrNotSignedIn
 	}
 	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
 	if err != nil {
 		return Result{}, err
 	}
 	d.Screenshots = shots
-	s := &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
+	s = &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
 	if err := save(stateDir, s); err != nil {
 		return Result{}, err
 	}
