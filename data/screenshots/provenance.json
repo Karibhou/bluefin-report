@@ -1,8 +1,8 @@
 {
-  "source_commit": "fabb530c998b4b3898868c7c161c9145d3a4a38c",
-  "binary_sha256": "5917a4f2b0771364ef73a129d463540490a79cd3d7f61420289e98859b21e665",
+  "source_commit": "2394e4768d1678cb834769fde89ec8975d2c2dd0",
+  "binary_sha256": "32ac21c153242ae751191fa31d3b599cdc998d76572278522e52933bc12d61a8",
   "collector_sha256": "ddbe5bd5cf64a9a9e165319461d45158534fc732b966049a9a52bc8e4b4a93af",
-  "telemetry": "Repository fixtures only; not host data. Application ran with --dry-run.",
+  "telemetry": "Repository fixtures only (systemd-report telemetry and hardware/image identity); not host data. Application ran with --dry-run.",
   "viewport": {
     "width": 900,
     "height": 980
@@ -12,11 +12,17 @@
     "generate-system.json": "effb46a0c1c7b8e2bb48a084fb526c2c9f3f3912f934d2f766680962981ef625",
     "generate-user.json": "e1b90058a010953c2cc270feacdafa7d967d678e7c84db3e256c083ed2c4e19f",
     "list-sources-system.json": "335e03dbebe9e95de31db72d2eaf76fc5aab91b35e30fadbe43048de287a91ed",
-    "list-sources-user.json": "6d2cecf13d6505eeab31f5adca883a346f1ac31f52d0fa06b999a306a331286a"
+    "list-sources-user.json": "6d2cecf13d6505eeab31f5adca883a346f1ac31f52d0fa06b999a306a331286a",
+    "internal/extras/testdata/root/proc/cmdline": "ffe37bcf83f63b2bee2af68af69e891469042b522478a84e85c2727c3a8872fe",
+    "internal/extras/testdata/root/proc/cpuinfo": "dc52cbeb992cb6e800fbc06f881c7cfaabacdb58d54e1e7f602205fb4485be13",
+    "internal/extras/testdata/root/sys/class/drm/card0/device/uevent": "16e9daebd0886ca4f2f7384cee2945387590abf28fcfdcf70536be7a36fe5425",
+    "internal/extras/testdata/root/sysroot/state/deploy/0123456789abcdef0123456789abcdef/0123456789abcdef0123456789abcdef.origin": "0336517e747995d8865a2da6dbedf5e11fbd06d61cf3424c0dab5c40feac08f7",
+    "internal/extras/testdata/root/usr/bin/gnome-shell": "73f426b8fb8629c90ceb72bbc74fd8193ee85bf9a96b7dbe1d68f23ec854c7eb",
+    "internal/extras/testdata/root/usr/libexec/ublue-booted-image": "f5a9a3e077889bc374f06a9b52b51311582065651980558ac2eb5f2009f04db7"
   },
   "screenshots": {
-    "screenshot-overview.png": "3147c1988744a3424836348f4b49bdc1e41d9b73263f46536c7f6f1425d5c30e",
-    "screenshot-metrics.png": "dde3bc105c2e79e3abb1c46e59ca811d64adabe029b6815d6d72a5642ecb15e1",
-    "screenshot-review.png": "94a66f1d1a573b8e8c04c619d23fd7642815308b281f9900f1a299b2fa453c67"
+    "screenshot-overview.png": "803f60a542737259c8805dd164a2efe13f8b30cd2d7bf5feb00d0fac6498b6c8",
+    "screenshot-metrics.png": "cf87ed2a4b35dc56a68084d625f53d7b40dfd5bf5eb7cc54f36cd3e179792eb2",
+    "screenshot-review.png": "ac643bb4f382ae5001fa68bb15396b931114f5b49429a00db6fa599c71a0ae4a"
   }
 }
