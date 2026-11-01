@@ -132,7 +132,7 @@ type Section struct {
 }
 
 var Sections = []Section{
-	{"bootErrors", "Errors from this boot", true, []string{"journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short"}},
+	{"bootErrors", "Errors from this boot", true, []string{"journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short", "--no-hostname"}},
 	{"crashes", "Crashes in the last 7 days", true, []string{"coredumpctl", "list", "--no-pager", "--since", "-7d"}},
 	{"gnomeExtensions", "Enabled GNOME extensions", false, []string{"gnome-extensions", "list", "--enabled"}},
 	{"flatpaks", "Installed Flatpak apps", false, []string{"flatpak", "list", "--app", "--columns=application,version"}},
