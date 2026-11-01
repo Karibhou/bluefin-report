@@ -43,6 +43,10 @@ artifacts without creating a tag, release, or README-refresh PR. PRs and merge
 groups also run read-only previews. Publishing manually requires the default
 branch and `publish: true`; scheduled releases are not cut per commit.
 
+Read-only previews have separate concurrency groups and cannot replace a queued
+publication. Running publications are never cancelled. GitHub can still replace
+a pending publishing run with a newer publishing run in the same group.
+
 For maintainer recovery, `make bump` still allocates an annotated tag on a clean,
 up-to-date `main` after checks. Push the printed tag command to run the same gated
 release flow. Do not hand-pick version numbers. Agents must not cut or push real

@@ -130,7 +130,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: |
           chmod +x build/bluefin-report
-          docker run --rm --env GITHUB_SHA="$SOURCE_SHA" --volume "$PWD:/workspace" --workdir /workspace fedora:44 bash -euo pipefail -c '
+          docker run --rm --env GITHUB_SHA="$SOURCE_SHA" --volume "$PWD:/workspace" --workdir /workspace docker.io/library/fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80 bash -euo pipefail -c '
             dnf install -y python3-gobject python3-pyatspi gobject-introspection xdotool ImageMagick xorg-x11-server-Xvfb dbus-daemon at-spi2-core adwaita-icon-theme gtk4 libadwaita git
             Xvfb :99 -screen 0 1440x1000x24 -nolisten tcp &
             export DISPLAY=:99
