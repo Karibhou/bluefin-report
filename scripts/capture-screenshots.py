@@ -20,6 +20,8 @@ from gi.repository import GLib
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGES = ("screenshot-overview.png", "screenshot-metrics.png", "screenshot-review.png")
+# Hardware/image identity fixture: proc, sys and stub commands instead of the host.
+FIXTURE_ROOT = ROOT / "internal/extras/testdata/root"
 
 
 def digest(path):
@@ -106,6 +108,8 @@ def main():
             LC_ALL="C.UTF-8",
             TZ="UTC",
             BLUEFIN_REPORT_SYSTEMD_REPORT=str(collector),
+            BLUEFIN_REPORT_FIXTURE_ROOT=str(FIXTURE_ROOT),
+            PATH=f"{FIXTURE_ROOT / 'usr/bin'}{os.pathsep}{os.environ.get('PATH', '')}",
         )
         if library_path := os.environ.get("SCREENSHOT_LIBRARY_PATH"):
             environment["PUREGOTK_LIB_FOLDER"] = library_path
@@ -186,9 +190,10 @@ def main():
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "binary_sha256": digest(binary),
         "collector_sha256": digest(collector),
-        "telemetry": "Repository fixtures only; not host data. Application ran with --dry-run.",
+        "telemetry": "Repository fixtures only (systemd-report telemetry and hardware/image identity); not host data. Application ran with --dry-run.",
         "viewport": {"width": 900, "height": 980},
-        "fixtures": {path.name: digest(path) for path in sorted(fixtures.iterdir()) if path.is_file()},
+        "fixtures": {path.name: digest(path) for path in sorted(fixtures.iterdir()) if path.is_file()}
+        | {str(path.relative_to(ROOT)): digest(path) for path in sorted(FIXTURE_ROOT.rglob("*")) if path.is_file()},
         "screenshots": {name: digest(output / name) for name in IMAGES},
     }
     (output / "screenshot-provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")

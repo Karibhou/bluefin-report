@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/projectbluefin/bluefin-report/internal/extras"
 	"github.com/projectbluefin/bluefin-report/internal/snapshot"
 	"github.com/projectbluefin/bluefin-report/internal/ui"
 )
@@ -25,6 +26,10 @@ func main() {
 		return
 	}
 	if !*printSummary {
+		// Screenshot captures only: identity probes read a fixture tree, not the host.
+		if root := os.Getenv("BLUEFIN_REPORT_FIXTURE_ROOT"); *dryRun && root != "" {
+			extras.Root = root
+		}
 		os.Exit(ui.Run(*dryRun))
 	}
 

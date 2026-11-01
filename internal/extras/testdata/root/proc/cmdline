@@ -1,0 +1,1 @@
+BOOT_IMAGE=fixture root=LABEL=root rw composefs.digest=v1-sha512-12:0123456789abcdef0123456789abcdef
