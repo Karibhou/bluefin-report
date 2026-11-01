@@ -193,16 +193,28 @@ func (r *redactor) text(s string) string {
 	s = r.replace(reHome, s, "home path", "~")
 	s = r.replace(reMAC, s, "MAC address", "[mac]") // before IPv6: a MAC also parses as hex groups
 	s = reIPish.ReplaceAllStringFunc(s, func(tok string) string {
-		ip := net.ParseIP(strings.Trim(tok, ".:"))
+		candidate := tok
+		ip := net.ParseIP(candidate)
+		if ip == nil {
+			// Sentence punctuation may surround an address, but colons can be
+			// meaningful IPv6 compression and must survive the first retry.
+			candidate = strings.Trim(tok, ".")
+			ip = net.ParseIP(candidate)
+		}
+		if ip == nil {
+			// Keep recognizing IPv4 and uncompressed IPv6 next to a colon.
+			candidate = strings.Trim(tok, ".:")
+			ip = net.ParseIP(candidate)
+		}
 		if ip == nil {
 			return tok // versions, times, unit names
 		}
 		if ip.To4() != nil {
 			r.removed["IPv4 address"]++
-			return strings.Replace(tok, strings.Trim(tok, ".:"), "[ipv4]", 1)
+			return strings.Replace(tok, candidate, "[ipv4]", 1)
 		}
 		r.removed["IPv6 address"]++
-		return strings.Replace(tok, strings.Trim(tok, ".:"), "[ipv6]", 1)
+		return strings.Replace(tok, candidate, "[ipv6]", 1)
 	})
 	for i, re := range r.literals {
 		s = r.replace(re, s, r.names[i], "["+r.names[i]+"]")

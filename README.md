@@ -30,8 +30,10 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 - Removed before you ever see it: hostname, machine ID, boot ID, machine-info,
   hardware serial numbers, system UUID and asset tags, report-signing keys,
   your username, MAC/IPv4/IPv6 addresses, email addresses, and home paths
-  (`/home/<user>` → `~`). Pattern redaction is best-effort; the Review page
-  lists every removal with a count.
+  (`/home/<user>` → `~`). Compressed IPv6 (including IPv4-mapped addresses)
+  is scrubbed even in brackets or next to sentence punctuation; diagnostic
+  versions and times are preserved. Pattern redaction is best-effort; the
+  Review page lists every removal with a count.
 - Never sent unless you opt in per entry: file contents (`io.systemd.Files.*`)
   and user-session metrics.
 - Sent byte-for-byte as shown in Review; editing anything withdraws consent.

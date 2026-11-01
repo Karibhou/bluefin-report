@@ -78,6 +78,67 @@ func TestBuildRemovesIdentifiersAndKeepsDiagnostics(t *testing.T) {
 	}
 }
 
+func TestBuildRedactsCompressedIPv6AndKeepsDiagnostics(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		input string
+		want  string
+		rule  string
+	}{
+		{"mapped IPv4", "::ffff:192.0.2.128", "[ipv4]", "IPv4 address"},
+		{"trailing compression", "2001:db8::", "[ipv6]", "IPv6 address"},
+		{"leading compression", "::1", "[ipv6]", "IPv6 address"},
+		{"unspecified", "::", "[ipv6]", "IPv6 address"},
+		{"bracketed", "[2001:db8::]", "[[ipv6]]", "IPv6 address"},
+		{"bracketed loopback", "[::1]:443", "[[ipv6]]:443", "IPv6 address"},
+		{"sentence punctuation", "(2001:db8::).", "([ipv6]).", "IPv6 address"},
+		{"mapped sentence punctuation", "(::ffff:192.0.2.128).", "([ipv4]).", "IPv4 address"},
+		{"leading punctuation", "...::1", "...[ipv6]", "IPv6 address"},
+		{"IPv4", "192.0.2.128", "[ipv4]", "IPv4 address"},
+		{"IPv4 punctuation", ":192.0.2.128.", ":[ipv4].", "IPv4 address"},
+		{"version", "7.2.11-ogc4", "7.2.11-ogc4", ""},
+		{"time", "00:37:42", "00:37:42", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := metric("io.systemd.Network.Address", tt.input, tt.input)
+			m.Fields = map[string]any{"address": tt.input}
+			s := snapshot.Snapshot{System: snapshot.Report{Metrics: []snapshot.Metric{m}}}
+			p, err := Build(s, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc document
+			if err := json.Unmarshal(p.JSON, &doc); err != nil {
+				t.Fatal(err)
+			}
+			if len(doc.System.Metrics) != 1 {
+				t.Fatalf("got %d metrics, want 1", len(doc.System.Metrics))
+			}
+			got := doc.System.Metrics[0]
+			var value string
+			if err := json.Unmarshal(got.Value, &value); err != nil {
+				t.Fatal(err)
+			}
+			if got.Object != tt.want || value != tt.want || got.Fields["address"] != tt.want {
+				t.Errorf("scrubbed object = %q, value = %q, field = %q; want %q",
+					got.Object, value, got.Fields["address"], tt.want)
+			}
+			if tt.rule == "" {
+				if len(p.Removed) != 0 {
+					t.Errorf("diagnostic was counted as removed: %v", p.Removed)
+				}
+			} else {
+				if strings.Contains(string(p.JSON), tt.input) {
+					t.Errorf("exported payload still contains %q", tt.input)
+				}
+				if len(p.Removed) != 1 || p.Removed[tt.rule] != 3 {
+					t.Errorf("Removed = %v, want %q: 3", p.Removed, tt.rule)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildUserScopeAndFilesAreOptIn(t *testing.T) {
 	p, err := Build(sample(), Options{Username: "jorge", KeepFiles: []string{"io.systemd.Files.os-release"}})
 	if err != nil {
