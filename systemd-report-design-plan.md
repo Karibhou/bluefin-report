@@ -267,16 +267,16 @@ Bonedigger and `ujust report` are unchanged.
 
 ## 12. Scope against the original inspector prompt
 
-The project began from a [prompt](https://pastebin.com/raw/CyAf24V1) for a "systemd Inspector & Trust Center": a four-view `AdwNavigationSplitView` app with live telemetry, signing, fleet upload and admin tools. This plan deliberately builds a different product, the support-report journey of §3. A capability missing below is a scope choice, not a bug in the support-report flow; a focused audit fix does not imply building the inspector. Tracking issue: [#14](https://github.com/projectbluefin/bluefin-report/issues/14).
+The project began from a [prompt](https://pastebin.com/raw/CyAf24V1) for a "systemd Inspector & Trust Center": a four-view `AdwNavigationSplitView` app with live telemetry, signing, fleet upload and admin tools. This plan deliberately builds a different product, the support-report journey of §3. A capability missing below is a scope choice, not a bug in the support-report flow; a focused audit fix does not imply building the inspector. Decided in [#14](https://github.com/projectbluefin/bluefin-report/issues/14); each Follow-up row has its own issue.
 
-Status: **Kept** = shipped, possibly reshaped. **Follow-up** = belongs to the current design, needs its own issue. **Deferred** = roadmap, revisit when the stated condition holds. **Rejected** = out of scope for this product.
+Status: **Kept** = shipped, possibly reshaped. **Follow-up** = belongs to the current design, tracked in the linked issue. **Deferred** = roadmap, revisit when the stated condition holds. **Rejected** = out of scope for this product.
 
 | Prompt capability | Status | Where it stands |
 | :--- | :--- | :--- |
 | Static facts (OS, kernel, arch, image, CPU, GPU) | Kept | Overview "This System" group. The prompt's hostname, machine/boot ID and SMBIOS serials are not shown and are dropped from the attachment (§6). |
-| Per-fact Copy button, export | Follow-up | Metric values copy and the reviewed report exports (Journey C); copy on Overview fact rows is not built. |
+| Per-fact Copy button, export | Follow-up | Metric values copy and the reviewed report exports (Journey C); copy on Overview fact rows: [#65](https://github.com/projectbluefin/bluefin-report/issues/65). |
 | Raw metric browsing | Kept | Metrics page, both scopes, user rows prefixed `user:`. |
-| `describe` metadata in tooltips | Follow-up | `snapshot.Describe` parses it; no UI caller yet. Tooltips show only name and value. |
+| `describe` metadata in tooltips | Follow-up | `snapshot.Describe` parses it; no UI caller yet. Tooltips show only name and value: [#64](https://github.com/projectbluefin/bluefin-report/issues/64). |
 | System/user scope toggle | Deferred | Both scopes are always collected (§5). A Metrics-page scope filter is a refinement, not a requirement. |
 | Dot-boundary match filtering | Deferred | `snapshot.Take` forwards matches; the UI filters by case-insensitive substring over rendered rows, which also finds values. |
 | Inspect and save the compiled JSON report | Kept | Review "Attachment" tab shows the scrubbed `generate` object; Export Report… saves it (§4, §6). |
