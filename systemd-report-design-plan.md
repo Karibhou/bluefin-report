@@ -73,10 +73,10 @@ AdwApplicationWindow
         │     AdwToolbarView + AdwHeaderBar [Refresh] [menu: Drafts, Keyboard Shortcuts, About]
         │     AdwBanner (dry-run / partial snapshot)
         │     AdwPreferencesPage (clamped)
-        │       Group "This system": image, version, kernel, arch, uptime   (AdwActionRow)
-        │       Group "Health": failed units, unreachable sources            (AdwActionRow → detail)
-        │       Group "Get help": [Report a Problem] [Confirm Existing Issue] (suggested-action pill)
-        │       Group: "Browse all metrics" →                                (AdwActionRow, go-next)
+        │       Heading + description (target repo, review promise) + [Report a Problem] (the one suggested-action pill)
+        │       Group "Already Reported?": Confirm Existing Issue →, Update Your Issue →   (AdwActionRow, subtitle says who it's for)
+        │       Group "System Health": failed units, warnings; "Get Help Fixing This" → only when there are problems
+        │       Group "This System": System Details (AdwExpanderRow, collapsed), Browse All Metrics →
         ├── Metrics (pushed)    GtkSearchBar + GtkListView (virtualized) grouped by source
         ├── Compose (pushed)    mode-specific form → [Review…]
         ├── Review (pushed)     AdwViewStack: Issue text | Attachment | What was removed

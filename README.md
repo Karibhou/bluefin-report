@@ -36,12 +36,13 @@ Browse All Metrics filters the collected snapshot as you type. Each row has a
 Copy button for its complete value, including text shortened on screen. An empty
 search result explains how to recover; an empty collection is shown separately.
 
-Add to Existing Issue lets the person who opened an issue post an updated
-reviewed report to it, for example after rebooting, with its own artifact and
-comment. Others should use Confirm Existing Issue.
-When Overview shows a problem, Troubleshoot with Goose copies a short prompt
+Overview leads with Report a Problem. Under Already Reported?, Confirm Existing
+Issue adds your report to someone else's issue, and Update Your Issue lets the
+person who opened an issue post an updated reviewed report to it, for example
+after rebooting, with its own artifact and comment.
+When Overview shows a problem, Get Help Fixing This copies a short summary
 (image plus failed-unit and warning counts, no unit names) and runs
-`chairlift --ask-bluefin`; Control Center opens Goose or walks through its setup.
+`chairlift --ask-bluefin`; Control Center opens its assistant or walks through its setup.
 
 ## Privacy
 
