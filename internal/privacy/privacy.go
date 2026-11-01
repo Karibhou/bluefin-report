@@ -82,6 +82,14 @@ var (
 
 var hostname = os.Hostname
 
+// localIDs pair the machine and boot ID families with the local files holding the same
+// values. The files are read even when the system report is missing or rejected, so
+// copies in user metrics (a journal entry's _MACHINE_ID, _BOOT_ID, __CURSOR) are still caught.
+var localIDs = []struct{ name, rule, path string }{
+	{"io.systemd.Basic.MachineID", "machine ID", "/etc/machine-id"},
+	{"io.systemd.Basic.BootID", "boot ID", "/proc/sys/kernel/random/boot_id"},
+}
+
 // Build produces the reviewed payload from a snapshot. It refuses to return a
 // payload unless a hostname identity can be resolved locally or from a report.
 func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
@@ -116,17 +124,27 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 	// Dropping the MachineID and BootID families by name is not enough: their values
 	// recur inside other metrics, such as the journal entry carried by
 	// io.systemd.Journal.HighPriorityMessage (_MACHINE_ID, _BOOT_ID, __CURSOR).
-	for _, id := range []struct{ name, rule string }{
-		{"io.systemd.Basic.MachineID", "machine ID"},
-		{"io.systemd.Basic.BootID", "boot ID"},
-	} {
-		seen := []string{}
+	for _, id := range localIDs {
+		values := []string{}
+		if b, err := os.ReadFile(id.path); err == nil {
+			values = append(values, string(b))
+		}
 		for _, report := range []snapshot.Report{s.System, s.User} {
 			for _, m := range report.Metrics {
 				var reported string
-				if m.Name == id.name && json.Unmarshal(m.Value, &reported) == nil && !slices.Contains(seen, reported) {
-					seen = append(seen, reported)
-					r.literal(id.rule, reported)
+				if m.Name == id.name && json.Unmarshal(m.Value, &reported) == nil {
+					values = append(values, reported)
+				}
+			}
+		}
+		seen := []string{}
+		for _, v := range values {
+			// The kernel prints the boot ID as a dashed UUID; the journal writes 32 hex digits.
+			v = strings.TrimSpace(v)
+			for _, form := range []string{v, strings.ReplaceAll(v, "-", "")} {
+				if !slices.Contains(seen, form) {
+					seen = append(seen, form)
+					r.literal(id.rule, form)
 				}
 			}
 		}

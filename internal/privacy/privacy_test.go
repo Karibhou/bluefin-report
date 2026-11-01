@@ -3,6 +3,7 @@ package privacy
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -157,6 +158,47 @@ func TestBuildScrubsHostnameWithoutSystemReport(t *testing.T) {
 		if strings.Contains(string(p.JSON), secret) {
 			t.Errorf("payload leaks %q:\n%s", secret, p.JSON)
 		}
+	}
+}
+
+// With no system report there are no MachineID/BootID metrics; the local files must
+// still provide the literals, in both the kernel's dashed and the journal's plain form.
+func TestBuildScrubsMachineAndBootIDWithoutSystemReport(t *testing.T) {
+	original := localIDs
+	t.Cleanup(func() { localIDs = original })
+	dir := t.TempDir()
+	machineID := filepath.Join(dir, "machine-id")
+	bootID := filepath.Join(dir, "boot_id")
+	if err := os.WriteFile(machineID, []byte("0123456789abcdef0123456789abcdef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bootID, []byte("fedcba98-7654-3210-fedc-ba9876543210\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localIDs = []struct{ name, rule, path string }{
+		{"io.systemd.Basic.MachineID", "machine ID", machineID},
+		{"io.systemd.Basic.BootID", "boot ID", bootID},
+	}
+	s := snapshot.Snapshot{User: snapshot.Report{Metrics: []snapshot.Metric{
+		{Name: "io.systemd.Journal.HighPriorityMessage", Object: "app", Value: json.RawMessage(`{
+			"__CURSOR": "s=1a2b;i=4f;b=fedcba9876543210fedcba9876543210;m=1;t=2;x=3",
+			"_MACHINE_ID": "0123456789abcdef0123456789abcdef",
+			"_BOOT_ID": "fedcba9876543210fedcba9876543210",
+			"MESSAGE": "boot fedcba98-7654-3210-fedc-ba9876543210 failed"
+		}`)},
+	}}}
+	p, err := Build(s, Options{IncludeUser: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(p.JSON)
+	for _, secret := range []string{"0123456789abcdef", "fedcba98"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("payload still contains %q:\n%s", secret, out)
+		}
+	}
+	if p.Removed["machine ID"] != 1 || p.Removed["boot ID"] != 3 {
+		t.Errorf("Removed = %v", p.Removed)
 	}
 }
 
