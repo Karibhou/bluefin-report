@@ -843,7 +843,7 @@ func TestResumeRefusesDraftEditedOnDisk(t *testing.T) {
 		}
 		before, _ := os.ReadFile(state)
 		f = newFake()
-		if _, err := Resume(context.Background(), f.exec, dir, d.ReportID); err == nil || len(f.calls) != 0 {
+		if _, err := Resume(context.Background(), f.exec, dir, d.ReportID); !errors.Is(err, ErrDraftChanged) || len(f.calls) != 0 {
 			t.Fatalf("%s: err=%v calls=%v", edit, err, f.calls)
 		}
 		if after, _ := os.ReadFile(state); !bytes.Equal(before, after) {

@@ -214,6 +214,9 @@ type Saved struct {
 	Digest string `json:",omitempty"`
 }
 
+// ErrDraftChanged means a saved draft no longer matches what was reviewed, so Resume will never publish it.
+var ErrDraftChanged = errors.New("it was not published. Discard it from Drafts and start a new report")
+
 var ErrNotSignedIn = errors.New("gh is not signed in; run `gh auth login`")
 
 // Repos are the image repos that accept reports. A machine reports only to the repo of the image it runs.
@@ -394,10 +397,10 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 	if s.Stage != Published && s.Digest != "" {
 		got, err := digest(s.Draft)
 		if err != nil {
-			return Result{}, fmt.Errorf("report %s: saved draft is damaged: %w", reportID, err)
+			return Result{}, fmt.Errorf("report %s: saved draft is damaged (%v); %w", reportID, err, ErrDraftChanged)
 		}
 		if got != s.Digest {
-			return Result{}, fmt.Errorf("report %s was changed on disk after review; it was not published. Start a new report instead", reportID)
+			return Result{}, fmt.Errorf("report %s was changed on disk after review; %w", reportID, ErrDraftChanged)
 		}
 	}
 	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
