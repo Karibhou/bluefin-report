@@ -97,9 +97,10 @@ type ui struct {
 	health     *gtk.ListBox
 
 	// metrics
-	metrics *gtk.StringList
-	filter  *gtk.StringFilter
-	search  *gtk.SearchEntry
+	metrics     *gtk.StringList
+	filter      *gtk.StringFilter
+	search      *gtk.SearchEntry
+	syncResults func() // filtered n-items notify misses 0→0 when the store empties under a query
 
 	// compose
 	mode        publish.Mode
@@ -239,9 +240,9 @@ func (u *ui) activate() {
 			}
 		}
 	})
-	// Draft rows are rebuilt on every refresh; their buttons target these two
-	// actions with the report ID, so no per-row closure is ever connected.
-	idAction := func(name string, cb func(id string)) *gio.SimpleAction {
+	// Rows rebuilt on refresh target these string-parameter actions (report ID,
+	// metric value, screenshot path), so no per-row closure is ever connected.
+	stringAction := func(name string, cb func(s string)) *gio.SimpleAction {
 		a := gio.NewSimpleAction(name, glib.NewVariantType("s"))
 		a.ConnectActivate(hold(func(_ gio.SimpleAction, p uintptr) {
 			cb((*(**glib.Variant)(unsafe.Pointer(&p))).GetString(nil))
@@ -249,8 +250,12 @@ func (u *ui) activate() {
 		u.win.AddAction(a)
 		return a
 	}
-	idAction("draft-resume", u.resume)
-	u.discardAct = idAction("draft-discard", func(id string) {
+	stringAction("copy-metric", func(value string) {
+		u.win.GetClipboard().SetText(value)
+		u.toast("Metric value copied")
+	})
+	stringAction("draft-resume", u.resume)
+	u.discardAct = stringAction("draft-discard", func(id string) {
 		if u.publishing {
 			u.toast("Wait for publishing to finish")
 			return
@@ -258,7 +263,7 @@ func (u *ui) activate() {
 		u.discardID = id
 		u.discardDlg.Present(&u.win.Widget)
 	})
-	idAction("shot-remove", func(path string) {
+	stringAction("shot-remove", func(path string) {
 		u.shots = slices.DeleteFunc(u.shots, func(p string) bool { return p == path })
 		u.syncShots()
 	})
@@ -523,6 +528,7 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 		rows = append(rows, row("user: ", m))
 	}
 	u.metrics.Splice(0, u.metrics.GetNItems(), rows)
+	u.syncResults()
 	u.ovStack.SetVisibleChildName("ready")
 	u.syncReview()
 }
@@ -539,9 +545,13 @@ func (u *ui) buildMetrics() {
 
 	f := gtk.NewSignalListItemFactory()
 	f.ConnectSetup(hold(func(_ gtk.SignalListItemFactory, p uintptr) {
-		box := gtk.NewBox(gtk.OrientationVerticalValue, 2)
-		box.SetMarginStart(12)
-		box.SetMarginEnd(12)
+		row := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+		row.SetMarginStart(12)
+		row.SetMarginEnd(12)
+		row.SetMarginTop(6)
+		row.SetMarginBottom(6)
+		box := gtk.NewBox(gtk.OrientationVerticalValue, 6)
+		box.SetHexpand(true)
 		for _, mode := range []pango.EllipsizeMode{pango.EllipsizeMiddleValue, pango.EllipsizeEndValue} { // name, value
 			l := gtk.NewLabel("")
 			l.SetXalign(0)
@@ -553,16 +563,25 @@ func (u *ui) buildMetrics() {
 			}
 			box.Append(&l.Widget)
 		}
-		gtk.ListItemNewFromInternalPtr(p).SetChild(&box.Widget)
+		row.Append(&box.Widget)
+		copy := gtk.NewButtonFromIconName("edit-copy-symbolic")
+		copy.SetTooltipText("Copy metric value")
+		copy.SetValign(gtk.AlignCenterValue)
+		copy.AddCssClass("flat")
+		copy.SetActionName("win.copy-metric")
+		row.Append(&copy.Widget)
+		gtk.ListItemNewFromInternalPtr(p).SetChild(&row.Widget)
 	}))
 	f.ConnectBind(hold(func(_ gtk.SignalListItemFactory, p uintptr) {
 		li := gtk.ListItemNewFromInternalPtr(p)
 		s := gtk.StringObjectNewFromInternalPtr(li.GetItem().GoPointer()).GetString()
 		name, val, _ := strings.Cut(s, "\n")
-		box := li.GetChild()
+		row := li.GetChild()
+		box := row.GetFirstChild()
 		gtk.LabelNewFromInternalPtr(box.GetFirstChild().GoPointer()).SetText(name)
 		gtk.LabelNewFromInternalPtr(box.GetLastChild().GoPointer()).SetText(val)
 		box.SetTooltipText(name + " = " + val)
+		gtk.ButtonNewFromInternalPtr(row.GetLastChild().GoPointer()).SetActionTargetValue(glib.NewVariantString(val))
 	}))
 	lv := gtk.NewListView(gtk.NewNoSelection(model), &f.ListItemFactory)
 	lv.AddCssClass("navigation-sidebar")
@@ -570,10 +589,31 @@ func (u *ui) buildMetrics() {
 	sw.SetChild(&lv.Widget)
 	sw.SetVexpand(true)
 
+	empty := adw.NewStatusPage()
+	empty.SetIconName("edit-find-symbolic")
+	results := gtk.NewStack()
+	results.AddNamed(&sw.Widget, "results")
+	results.AddNamed(&empty.Widget, "empty")
+	results.SetVexpand(true)
+	u.syncResults = func() {
+		if model.GetNItems() > 0 {
+			results.SetVisibleChildName("results")
+			return
+		}
+		title, desc := emptyState(u.metrics.GetNItems(), u.search.GetText())
+		empty.SetTitle(title)
+		empty.SetDescription(desc)
+		results.SetVisibleChildName("empty")
+	}
+	model.ConnectNotify(hold(func(gobject.Object, uintptr) { u.syncResults() }))
+
 	search := gtk.NewSearchEntry()
 	u.search = search
 	search.SetPlaceholderText("Filter metrics")
-	search.ConnectSearchChanged(hold(func(gtk.SearchEntry) { u.filter.SetSearch(search.GetText()) }))
+	search.ConnectSearchChanged(hold(func(gtk.SearchEntry) {
+		u.filter.SetSearch(search.GetText())
+		u.syncResults()
+	}))
 	search.SetMarginTop(6)
 	search.SetMarginBottom(6)
 	search.SetMarginStart(12)
@@ -581,8 +621,18 @@ func (u *ui) buildMetrics() {
 
 	box := gtk.NewBox(gtk.OrientationVerticalValue, 0)
 	box.Append(&search.Widget)
-	box.Append(&sw.Widget)
+	box.Append(&results.Widget)
+	u.syncResults()
 	u.nav.Add(u.page("Metrics", "metrics", nil, &box.Widget))
+}
+
+// emptyState picks the metrics status page text: an empty collection wins over
+// a non-matching query so a retained search never hides a failed collection.
+func emptyState(total uint32, query string) (title, desc string) {
+	if total > 0 && query != "" {
+		return "No Results Found", "Try a different search or clear the filter."
+	}
+	return "No Metrics Available", "Refresh the snapshot and check the Overview for collection warnings."
 }
 
 // ---------- Compose ----------
