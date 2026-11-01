@@ -41,6 +41,17 @@ func sample() snapshot.Snapshot {
 			{Name: "io.systemd.Network.Address", Object: "wlp1s0", Value: str("192.168.7.21"),
 				Fields: map[string]any{"mac": "3c:22:fb:01:aa:9e", "v6": "fe80::3e22:fbff:fe01:aa9e", "n": 1.0}},
 			metric("io.systemd.Network.Owner", "", "contact jorge@example.org about /var/home/jorge/notes"),
+			// An "object" family: the value is a whole journal entry, which repeats the
+			// identifiers of the dropped Basic.* families below the top level.
+			{Name: "io.systemd.Journal.HighPriorityMessage", Object: "sshd", Value: json.RawMessage(`{
+				"__CURSOR": "s=1a2b;i=4f;b=fedcba9876543210fedcba9876543210;m=1;t=2;x=3",
+				"__REALTIME_TIMESTAMP": "1761957469000001",
+				"_HOSTNAME": "orca-desk",
+				"_MACHINE_ID": "0123456789abcdef0123456789abcdef",
+				"_BOOT_ID": "fedcba9876543210fedcba9876543210",
+				"MESSAGE": "Accepted publickey for jorge from 10.0.0.7 port 51234",
+				"PRIORITY": 3
+			}`)},
 		}},
 		User: snapshot.Report{Metrics: []snapshot.Metric{
 			metric("io.systemd.Manager.UnitActiveState", "app-orca\\x2ddesk.scope", "active"),
@@ -55,13 +66,14 @@ func TestBuildRemovesIdentifiersAndKeepsDiagnostics(t *testing.T) {
 	}
 	out := string(p.JSON)
 	for _, secret := range []string{"orca-desk", "x2ddesk", "0123456789abcdef", "fedcba98", "Jorge's office", "jorge",
-		"192.168.7.21", "3c:22:fb", "fe80::", "example.org", "ID=bluefin",
+		"192.168.7.21", "3c:22:fb", "fe80::", "example.org", "ID=bluefin", "10.0.0.7",
 		"PF3ABCD9", "4c4c4544", "L1HF16M00XY", "CHS99887766", "ASSET-0042", "TAG-7788", "uniquekey"} {
 		if strings.Contains(out, secret) {
 			t.Errorf("payload still contains %q", secret)
 		}
 	}
-	for _, keep := range []string{"7.2.11-ogc4", "dakota-gaming", "Laptop 13 (AMD Ryzen 7040Series)", "rpc-statd.service", "getty@tty1.service", "00:37:42", "wlp1s0", "var-home-[username]-vault.mount"} {
+	for _, keep := range []string{"7.2.11-ogc4", "dakota-gaming", "Laptop 13 (AMD Ryzen 7040Series)", "rpc-statd.service", "getty@tty1.service", "00:37:42", "wlp1s0", "var-home-[username]-vault.mount",
+		"Accepted publickey for [username] from [ipv4] port 51234", `"PRIORITY": 3`, `"__REALTIME_TIMESTAMP": "1761957469000001"`} {
 		if !strings.Contains(out, keep) {
 			t.Errorf("payload lost diagnostic value %q", keep)
 		}
@@ -73,8 +85,46 @@ func TestBuildRemovesIdentifiersAndKeepsDiagnostics(t *testing.T) {
 	if doc["user"] == nil {
 		t.Error("user scope requested but missing")
 	}
-	if p.Removed["identifying metric"] != 12 || p.Removed["MAC address"] != 1 || p.Removed["IPv4 address"] != 1 ||
+	if p.Removed["identifying metric"] != 12 || p.Removed["MAC address"] != 1 || p.Removed["IPv4 address"] != 2 ||
 		p.Removed["IPv6 address"] != 1 || p.Removed["email"] != 1 || p.Removed["home path"] != 1 {
+		t.Errorf("Removed = %v", p.Removed)
+	}
+}
+
+// The machine and boot IDs are dropped by family name, but copies elsewhere must be
+// rewritten too: a journal entry carries both, and its cursor embeds the boot ID.
+func TestBuildScrubsMachineAndBootIDCopies(t *testing.T) {
+	p, err := Build(sample(), Options{Username: "jorge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct{ System snapshot.Report }
+	if err := json.Unmarshal(p.JSON, &doc); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	var entry map[string]any
+	for _, m := range doc.System.Metrics {
+		if m.Name == "io.systemd.Journal.HighPriorityMessage" {
+			if err := json.Unmarshal(m.Value, &entry); err != nil {
+				t.Fatalf("object value no longer an object: %v", err)
+			}
+		}
+	}
+	if entry == nil {
+		t.Fatal("object-valued metric was dropped; it should be scrubbed and kept")
+	}
+	for k, want := range map[string]any{
+		"_HOSTNAME":   "[hostname]",
+		"_MACHINE_ID": "[machine ID]",
+		"_BOOT_ID":    "[boot ID]",
+		"__CURSOR":    "s=1a2b;i=4f;b=[boot ID];m=1;t=2;x=3",
+		"PRIORITY":    3.0,
+	} {
+		if entry[k] != want {
+			t.Errorf("%s = %v, want %v", k, entry[k], want)
+		}
+	}
+	if p.Removed["machine ID"] != 1 || p.Removed["boot ID"] != 2 {
 		t.Errorf("Removed = %v", p.Removed)
 	}
 }

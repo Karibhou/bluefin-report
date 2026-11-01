@@ -113,6 +113,24 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 	if len(r.literals) == 0 {
 		return Payload{}, fmt.Errorf("cannot prepare a private report: hostname identity unavailable")
 	}
+	// Dropping the MachineID and BootID families by name is not enough: their values
+	// recur inside other metrics, such as the journal entry carried by
+	// io.systemd.Journal.HighPriorityMessage (_MACHINE_ID, _BOOT_ID, __CURSOR).
+	for _, id := range []struct{ name, rule string }{
+		{"io.systemd.Basic.MachineID", "machine ID"},
+		{"io.systemd.Basic.BootID", "boot ID"},
+	} {
+		seen := []string{}
+		for _, report := range []snapshot.Report{s.System, s.User} {
+			for _, m := range report.Metrics {
+				var reported string
+				if m.Name == id.name && json.Unmarshal(m.Value, &reported) == nil && !slices.Contains(seen, reported) {
+					seen = append(seen, reported)
+					r.literal(id.rule, reported)
+				}
+			}
+		}
+	}
 	r.literal("username", opt.Username)
 
 	doc := document{MediaType: s.System.MediaType, System: r.report(s.System, opt.KeepFiles)}
