@@ -1130,6 +1130,9 @@ func (u *ui) run(retry func(), step func(context.Context, publish.Exec) (publish
 			case errors.Is(err, publish.ErrNotSignedIn):
 				u.retry = retry
 				u.signInDlg.Present(&u.win.Widget)
+			case errors.Is(err, publish.ErrDraftChanged):
+				u.refreshDrafts()
+				u.showError("Publishing failed: " + err.Error())
 			case err != nil:
 				u.refreshDrafts()
 				u.showError("Publishing failed: " + err.Error() + "\n\nYour draft was kept; resume it from Drafts.")
@@ -1207,7 +1210,15 @@ func (u *ui) refreshDrafts() {
 		btn("user-trash-symbolic", "Discard", "win.draft-discard")
 		u.draftList.Append(&r.Widget)
 	}
-	if len(ds) == 0 {
+	if err != nil { // the readable drafts are still listed above
+		r := adw.NewActionRow()
+		r.SetTitle("Some saved reports couldn't be read")
+		r.SetSubtitle(err.Error())
+		r.SetSubtitleSelectable(true)
+		r.AddPrefix(&gtk.NewImageFromIconName("dialog-warning-symbolic").Widget)
+		u.draftList.Append(&r.Widget)
+	}
+	if len(ds) == 0 && err == nil {
 		r := adw.NewActionRow()
 		r.SetTitle("No unfinished reports")
 		u.draftList.Append(&r.Widget)

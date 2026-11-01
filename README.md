@@ -53,7 +53,8 @@ search result explains how to recover; an empty collection is shown separately.
   An unfinished report can be retried under the same ID only with its unchanged
   reviewed draft (including its report, area, and screenshots). Resume from Drafts
   publishes that unchanged saved version; start a new report to publish edits instead.
-  Unreadable or corrupt saved state is not overwritten.
+  A draft whose files were changed on disk after Review is refused, not published.
+  Unreadable or corrupt saved state is not overwritten, and the other drafts are still listed.
 - The full report is attached publicly to the issue as `systemd-report.json`
   (an issue artifact): anyone who can see the issue can read it. Only if GitHub
   refuses artifacts does it fall back to a secret gist linked in an issue comment.
