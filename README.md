@@ -25,6 +25,13 @@ bluefin-report --dry-run         # full flow, but gh calls are logged, not run
 bluefin-report --print-summary   # collect a snapshot and print the overview, no UI
 ```
 
+Collection keeps system and user scopes separate: missing or malformed report
+output produces a scoped warning without discarding the healthy scope. A valid
+report with an empty metrics array is accepted, and numeric metric fields retain
+their original JSON precision. A missing `systemd-report` executable is reported
+as not installed; permission or executable-format failures stop collection.
+Nonzero exits can still supply usable reports, with the failure shown as a warning.
+
 Browse All Metrics filters the collected snapshot as you type. Each row has a
 Copy button for its complete value, including text shortened on screen. An empty
 search result explains how to recover; an empty collection is shown separately.

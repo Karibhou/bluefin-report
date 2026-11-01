@@ -5,9 +5,11 @@
 package privacy
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -82,10 +84,21 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 		opt.MaxBytes = MaxBytes
 	}
 	r := redactor{removed: map[string]int{}}
+	// The system report may be missing or rejected; os.Hostname still catches the
+	// hostname in user metrics and extras.
+	hosts := []string{}
+	if h, err := os.Hostname(); err == nil {
+		hosts = append(hosts, h)
+	}
 	for _, m := range s.System.Metrics {
 		if m.Name == "io.systemd.Basic.Hostname" {
-			r.literal("hostname", m.String())
+			hosts = append(hosts, m.String())
 		}
+	}
+	// Longest first, so "orca" never leaves the "-desk" of "orca-desk" behind.
+	slices.SortFunc(hosts, func(a, b string) int { return cmp.Or(len(b)-len(a), strings.Compare(a, b)) })
+	for _, h := range slices.Compact(hosts) {
+		r.literal("hostname", h)
 	}
 	r.literal("username", opt.Username)
 
