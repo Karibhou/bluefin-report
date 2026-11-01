@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Report a problem
+Name=Report a Problem
 GenericName=Problem Reporter
 Comment=Report a bug, crash, freeze or error to Bluefin with a reviewed system report
 Exec=bluefin-report
