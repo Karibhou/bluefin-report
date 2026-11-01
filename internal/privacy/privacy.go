@@ -5,9 +5,11 @@
 package privacy
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"regexp"
@@ -78,7 +80,10 @@ var (
 	reUnit  = regexp.MustCompile(`\.(service|socket|target|mount|automount|swap|timer|path|slice|scope|device)$`)
 )
 
-// Build produces the reviewed payload from a snapshot.
+var hostname = os.Hostname
+
+// Build produces the reviewed payload from a snapshot. It refuses to return a
+// payload unless a hostname identity can be resolved locally or from a report.
 func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 	if opt.MaxBytes == 0 {
 		opt.MaxBytes = MaxBytes
@@ -87,18 +92,26 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 	// The system report may be missing or rejected; os.Hostname still catches the
 	// hostname in user metrics and extras.
 	hosts := []string{}
-	if h, err := os.Hostname(); err == nil {
+	if h, err := hostname(); err == nil {
 		hosts = append(hosts, h)
 	}
-	for _, m := range s.System.Metrics {
-		if m.Name == "io.systemd.Basic.Hostname" {
-			hosts = append(hosts, m.String())
+	for _, report := range []snapshot.Report{s.System, s.User} {
+		for _, m := range report.Metrics {
+			if m.Name == "io.systemd.Basic.Hostname" {
+				var reported string
+				if json.Unmarshal(m.Value, &reported) == nil {
+					hosts = append(hosts, reported)
+				}
+			}
 		}
 	}
 	// Longest first, so "orca" never leaves the "-desk" of "orca-desk" behind.
 	slices.SortFunc(hosts, func(a, b string) int { return cmp.Or(len(b)-len(a), strings.Compare(a, b)) })
 	for _, h := range slices.Compact(hosts) {
 		r.literal("hostname", h)
+	}
+	if len(r.literals) == 0 {
+		return Payload{}, fmt.Errorf("cannot prepare a private report: hostname identity unavailable")
 	}
 	r.literal("username", opt.Username)
 
@@ -142,10 +155,10 @@ type redactor struct {
 }
 
 // literal scrubs an exact word (hostname, username), including the form systemd uses
-// in unit names, where "-" is escaped as `\x2d`. Very short values are skipped:
-// replacing "a" everywhere would destroy the report.
+// in unit names, where "-" is escaped as `\x2d`. Word boundaries keep short known
+// identities from replacing fragments of diagnostic words.
 func (r *redactor) literal(rule, v string) {
-	if len(v) < 3 {
+	if strings.TrimSpace(v) == "" {
 		return
 	}
 	for _, form := range slices.Compact([]string{v, strings.ReplaceAll(v, "-", `\x2d`)}) {
@@ -163,23 +176,58 @@ func (r *redactor) report(in snapshot.Report, keep []string) snapshot.Report {
 		}
 		net := strings.HasPrefix(m.Name, "io.systemd.Network.")
 		m.Object = r.text(r.virtualIf(net, m.Object))
-		if len(m.Fields) > 0 {
-			f := make(map[string]any, len(m.Fields))
-			for k, v := range m.Fields {
-				if s, ok := v.(string); ok {
-					v = r.text(r.virtualIf(net, s))
-				}
-				f[k] = v
-			}
-			m.Fields = f
+		if fields, changed := r.value(m.Fields, net); changed {
+			m.Fields = fields.(map[string]any)
 		}
-		var s string
-		if json.Unmarshal(m.Value, &s) == nil {
-			m.Value, _ = json.Marshal(r.text(s))
+		var value any
+		decoder := json.NewDecoder(bytes.NewReader(m.Value))
+		decoder.UseNumber()
+		if json.Valid(m.Value) && decoder.Decode(&value) == nil {
+			if scrubbed, changed := r.value(value, false); changed {
+				m.Value, _ = json.Marshal(scrubbed)
+			}
 		}
 		out.Metrics = append(out.Metrics, m)
 	}
 	return out
+}
+
+// value copies only changed containers, leaving the snapshot and untouched JSON
+// values intact. Numbers decoded from metric values retain their original tokens.
+func (r *redactor) value(v any, network bool) (any, bool) {
+	switch v := v.(type) {
+	case string:
+		out := r.text(r.virtualIf(network, v))
+		return out, out != v
+	case map[string]any:
+		out := v
+		changed := false
+		for key, value := range v {
+			if scrubbed, modified := r.value(value, network); modified {
+				if !changed {
+					out = maps.Clone(v)
+					changed = true
+				}
+				out[key] = scrubbed
+			}
+		}
+		return out, changed
+	case []any:
+		out := v
+		changed := false
+		for i, value := range v {
+			if scrubbed, modified := r.value(value, network); modified {
+				if !changed {
+					out = slices.Clone(v)
+					changed = true
+				}
+				out[i] = scrubbed
+			}
+		}
+		return out, changed
+	default:
+		return v, false
+	}
 }
 
 // reVirtualIf matches VPN/container/bridge interface names, which reveal network setup.
