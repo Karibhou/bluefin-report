@@ -18,7 +18,12 @@ import (
 func main() {
 	printSummary := flag.Bool("print-summary", false, "collect a snapshot and print the overview")
 	dryRun := flag.Bool("dry-run", false, "log gh calls instead of publishing")
+	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *version {
+		fmt.Println(ui.Version)
+		return
+	}
 	if !*printSummary {
 		os.Exit(ui.Run(*dryRun))
 	}
@@ -27,7 +32,7 @@ func main() {
 	defer cancel()
 	s, err := snapshot.Take(ctx, snapshot.Run, nil)
 	if errors.Is(err, snapshot.ErrNotInstalled) {
-		fmt.Fprintf(os.Stderr, "%s not found: this system needs systemd 262\n", snapshot.Binary)
+		fmt.Fprintf(os.Stderr, "%s not found: this system needs systemd 261 or newer with systemd-report\n", snapshot.Binary)
 		os.Exit(1)
 	}
 	if err != nil {

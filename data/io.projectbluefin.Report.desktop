@@ -1,10 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Bluefin Report
-Comment=Review and share a system health report
+Name=Report a problem
+GenericName=Problem Reporter
+Comment=Report a bug, crash, freeze or error to Bluefin with a reviewed system report
 Exec=bluefin-report
 Icon=io.projectbluefin.Report
 Terminal=false
-Categories=System;GTK;
-Keywords=report;bug;diagnostics;systemd;health;
+Categories=Utility;X-GNOME-Utilities;GTK;
+Keywords=bug;crash;freeze;error;issue;problem;report;feedback;support;help;logs;diagnostics;troubleshoot;GitHub;systemd;
 StartupNotify=true

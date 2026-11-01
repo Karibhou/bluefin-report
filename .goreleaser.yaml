@@ -16,11 +16,14 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w
+      # {{ .Tag }}, not {{ .Version }}: the calendar scheme is YY.MM.N and
+      # GoReleaser's semver parser normalises 26.09.1 to 26.9.1, which would
+      # drop the zero that makes the version read as a date.
+      - -s -w -X github.com/projectbluefin/bluefin-report/internal/ui.Version={{ .Tag }}
     main: ./cmd/bluefin-report
 
 archives:
-  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     files:
       - README.md

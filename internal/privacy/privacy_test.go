@@ -122,3 +122,63 @@ func TestBuildBudgetOmitsWholeFamiliesAndStaysValid(t *testing.T) {
 		t.Error("expected error when nothing fits")
 	}
 }
+
+func TestBuildMasksVirtualInterfaces(t *testing.T) {
+	s := snapshot.Snapshot{System: snapshot.Report{Metrics: []snapshot.Metric{
+		metric("io.systemd.Network.Address", "tailscale0", "up"),
+		metric("io.systemd.Network.Address", "wg0", "up"),
+		metric("io.systemd.Network.Address", "docker0", "up"),
+		{Name: "io.systemd.Network.Link", Object: "wlp1s0", Value: str("up"), Fields: map[string]any{"peer": "veth1234abc"}},
+		metric("io.systemd.Manager.UnitActiveState", "docker0", "active"), // not a network metric
+	}}}
+	p, err := Build(s, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(p.JSON)
+	for _, name := range []string{"tailscale0", "wg0", "veth1234abc"} {
+		if strings.Contains(out, name) {
+			t.Errorf("payload still contains %q", name)
+		}
+	}
+	if !strings.Contains(out, "wlp1s0") || p.Removed["virtual interface"] != 4 {
+		t.Errorf("Removed = %v, out = %s", p.Removed, out)
+	}
+}
+
+func TestExtrasAreRedacted(t *testing.T) {
+	journal := "Oct 31 10:00:01 orca-desk systemd[1]: jorge-backup failed for jorge from 10.0.0.5\n" +
+		"Oct 31 10:00:02 orca-desk kernel: eth0 3c:22:fb:01:aa:9e unit app-orca\\x2ddesk.scope /home/jorge/x"
+	p, err := Build(sample(), Options{Username: "jorge", Extras: map[string]string{"bootErrors": journal}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{string(p.JSON), p.Extras["bootErrors"]} {
+		for _, secret := range []string{"orca-desk", "x2ddesk", "jorge", "10.0.0.5", "3c:22:fb"} {
+			if strings.Contains(s, secret) {
+				t.Errorf("extras still contain %q: %s", secret, s)
+			}
+		}
+	}
+	if !strings.Contains(string(p.JSON), `"extras": {`) || !strings.Contains(p.Extras["bootErrors"], "[hostname] kernel") {
+		t.Errorf("extras missing from payload: %s", p.Extras["bootErrors"])
+	}
+	if p, _ := Build(sample(), Options{}); p.Extras != nil || strings.Contains(string(p.JSON), "extras") {
+		t.Error("no opt-in must mean no extras")
+	}
+}
+
+// The artifact is the payload inside a ```json fence; together they must stay under 1 MiB.
+func TestDefaultBudgetLeavesRoomForFence(t *testing.T) {
+	s := sample()
+	for i := range 20000 {
+		s.System.Metrics = append(s.System.Metrics, metric("io.systemd.Big", strings.Repeat("x", 40), strings.Repeat("y", i%80)))
+	}
+	p, err := Build(s, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len("```json\n") + len(p.JSON) + len("\n```\n"); len(p.Omitted) == 0 || n >= 1<<20 {
+		t.Fatalf("fenced artifact is %d bytes, omitted %v", n, p.Omitted)
+	}
+}

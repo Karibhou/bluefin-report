@@ -8,7 +8,8 @@ Design and status: [systemd-report-design-plan.md](systemd-report-design-plan.md
 - `cmd/bluefin-report`: entry point and flags (`--dry-run`, `--print-summary`)
 - `internal/snapshot`: runs `systemd-report` and parses it
 - `internal/privacy`: scrubs the payload before anything leaves the machine
-- `internal/publish`: gist + issue through `gh`, resumable by report ID
+- `internal/extras`: unprivileged probes systemd-report can't provide (image ref/tag/digest, CPU, GPU, GNOME) and the opt-in diagnostics (boot errors, crashes, extensions, Flatpaks)
+- `internal/publish`: issue, labels, report artifact (gist fallback) and screenshots through `gh`, resumable by report ID
 - `internal/ui`: the GTK app
 - `data/`: desktop file, AppStream metainfo, icon
 
@@ -20,6 +21,8 @@ Design and status: [systemd-report-design-plan.md](systemd-report-design-plan.md
   which reuses one package-level callback.
 - Tests never call the real `gh` for writes. Use `--dry-run` to drive the full flow by hand;
   it logs `gh` calls instead of running them.
+- Releases are calendar versions `YY.MM.N`, tagged deliberately with `make bump`
+  (never per commit, never by hand-picking a number). Agents do not tag or push releases.
 - Never weaken the privacy scrubber to make a test pass; the attachment must not contain hostname or username.
 
 ## Checks

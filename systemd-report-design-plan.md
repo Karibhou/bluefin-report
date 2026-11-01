@@ -53,7 +53,7 @@ Unverified: exact `describe` output for `io.systemd.Files.*`.
 Launch → app collects a snapshot automatically → user sees a summary ("Bluefin 43, kernel 6.x, 2 failed units, 1 source unreachable") → **Report a Problem** → title + what happened → Review → sign in if needed → Publish → issue URL.
 
 ### Journey B — "me too"
-Same as A but **Confirm Existing Issue** → paste URL or `#123` → Review a short fingerprint (image, kernel, arch, failed units) → comment posted. No attachment.
+Same as A but **Confirm Existing Issue** → paste URL or `#123` → optional note ("What you're seeing"), "Attach my system report" on by default → Review (Attachment tab + public-consent switch when attaching) → the scrubbed report is attached to that issue as artifact `systemd-report-<reportID>.json` (secret gist when artifacts are refused), then ONE comment: "Same problem here." + note + summary table + "Full report: …" + screenshots + `<!-- bluefin-report-id: ID -->` `<!-- bluefin-report-confirm -->`.
 
 ### Journey C — "just look"
 Launch → browse/search metrics → copy one value or export the reviewed report to a file. Never touches the network.
@@ -157,7 +157,7 @@ Principle: **nothing leaves the machine that the user has not seen in its final 
 5. **Freeze the payload.** Publish sends the bytes shown in Review, byte-for-byte; no re-collection or re-formatting after consent.
 6. **Size budgets keep valid JSON.** Attachment ≤ 1 MiB; if over, drop whole metric families (largest first), record them in `"omittedFamilies"`, never cut mid-object. Issue body ≤ 60 KB (GitHub limit is 65,536 chars).
 7. **Storage.** Raw snapshots live in memory only. Drafts store only the reviewed payload, in `$XDG_STATE_HOME/bluefin-report/drafts/<id>/`, mode `0700`/`0600`, written via temp file + rename.
-8. Deleting a local draft never implies deleting anything remote; the UI says so when a gist/issue already exists.
+8. Deleting a local draft never implies deleting anything remote; the UI says so when an issue (or fallback gist) already exists.
 
 Regex redaction is best-effort and the UI says so in one line, not a paragraph.
 
@@ -178,9 +178,12 @@ The repo is shown, not chosen. `publish.Submit` accepts only these two repos and
 Use `gh` (Homebrew) rather than a token store of our own. Beta 1 corrections:
 
 - Sign-in: run `gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key` without a TTY; read the one-time code from stderr, show it in an `AdwAlertDialog` with Copy, and open the URL with `GtkUriLauncher`. (Beta 1 said "8-character code" — it is `XXXX-XXXX`.) Verify exact non-TTY output against the pinned `gh` version before building on it.
-- Attachment: **secret gist** (default `gh gist create`, no `--public`). Anyone with the link can read it, which the consent text states plainly; it is not listed on the user's profile.
-- Triage preference: **do not pass `--label`.** Reporters usually lack triage permission on the target repo, so label writes can fail the whole create. Put `<!-- hive-queue: 3-clanker-queue -->` in the body and let Hive apply labels. Confirm marker name with the Hive owners.
-- Issue URL comes from `gh issue create` stdout.
+- Attachment: the full scrubbed report is attached to the issue as an **issue artifact** named `systemd-report.json`, a fenced ```` ```json ```` markdown document (`gh issue artifact create N --body-file - --name systemd-report.json -R <repo>`, preview in gh 2.103). It is public to anyone who can see the issue, which the consent text states plainly. The body says `Full report: attached to this issue as systemd-report.json`.
+- Fallback only when artifacts are refused outright (HTTP 401/403/404/410/422, or a gh without the preview command): a **secret gist** (`gh gist create`, no `--public`; not listed on the profile, readable by anyone with the link) linked in one issue comment `Full report: <gist>` carrying the report-id marker. Transient failures stay pending for Resume.
+- Labels: create the issue through REST (`gh api --method POST repos/<repo>/issues`) with `kind/bug`, the optional `area/*` the reporter picked, and issue type `Bug`. REST silently drops labels and type for reporters without push access (GraphQL would fail the whole create), so when the returned labels lack them the app posts one `/kind bug` (and `/area …`) comment, which Prow accepts from anyone. `needs-triage` → `triage/accepted` stays with maintainers. The `<!-- hive-queue: … -->` marker stays in the body.
+- Before attaching on Resume, `gh issue artifact list N --json name` is checked for `systemd-report.json`; before the fallback comment, the issue's comments are checked for the report-id marker.
+- Screenshots: Submit checks ≤ 10 files, ≤ 10 MiB each, image/video extensions before any network call, then copies them into `<draft>/screenshots/` (0600). NewIssue posts one `gh issue comment N --body-file - --attach <file>…` with body `Screenshots` + `<!-- bluefin-report-screenshots: ID -->` from stage `ShotsPending` (Resume checks comments for that marker first); Confirm passes `--attach` on the confirmation comment. Copies are deleted when Published. Screenshots are not scrubbed; the consent text says so.
+- Issue URL comes from the REST response.
 
 ### Publication is not atomic — model it
 
@@ -191,21 +194,27 @@ stateDiagram-v2
     [*] --> Draft
     Draft --> Reviewed: consent given
     Reviewed --> Draft: payload edited
-    Reviewed --> GistPending
+    Reviewed --> IssuePending
+    IssuePending --> IssueCreated: URL recorded
+    IssuePending --> Uncertain: crash or timeout
+    IssueCreated --> LabelsDone: kind/area ensured
+    LabelsDone --> Published: artifact attached (or none), no screenshots
+    LabelsDone --> ShotsPending: artifact attached, screenshots chosen
+    ShotsPending --> Published: screenshots comment posted
+    LabelsDone --> GistPending: artifacts refused
     GistPending --> GistCreated: URL recorded
     GistPending --> Uncertain: crash or timeout
-    GistCreated --> IssuePending
-    IssuePending --> Published: URL recorded
-    IssuePending --> Uncertain: crash or timeout
-    Uncertain --> GistCreated: lookup finds gist, no issue
-    Uncertain --> Published: lookup finds issue
-    Uncertain --> Reviewed: lookup finds nothing
+    GistCreated --> Published: link comment posted (ShotsPending if screenshots)
+    Uncertain --> IssueCreated: lookup finds issue
+    Uncertain --> Reviewed: lookup finds no issue
+    Uncertain --> GistCreated: lookup finds fallback gist
+    Uncertain --> GistPending: lookup finds no fallback gist
     Published --> [*]
 ```
 
-- Each draft carries a random `report-id` written into the gist description and an HTML comment in the issue body.
-- **Uncertain** is resolved by lookup, not by retrying: search the user's recent gists and `is:issue author:@me <report-id>` on the target repo. Only if nothing is found does the app return to Reviewed.
-- Confirm mode is one step (`gh issue comment`) with the same Uncertain handling.
+- Each draft carries a random `report-id` written into an HTML comment in the issue body (and, on fallback, the gist description and link comment).
+- **Uncertain** is resolved by lookup, not by retrying, through consistent REST list endpoints rather than lagging search: the user's issues on the target repo by `creator` with the report-id marker, or, once the issue exists, the user's recent gists by description. Only if nothing is found is the write retried. Artifact and comment steps after the issue exists re-check before writing instead.
+- Confirm: stages LabelsDone (artifact, listed by its per-report name first) → GistPending/GistCreated on refusal → CommentPending (Resume checks comments for the report-id marker) → Published.
 
 ## 8. Stack and packaging
 
@@ -244,7 +253,7 @@ Each slice is shippable and demoable.
 | 1 | **Snapshot core** — ✅ done | `go test -race ./internal/snapshot` passes on fixtures modeled on real v262 output (identifiers replaced): JSON-SEQ `describe`, permission-denied warning with rc 0, non-zero exit keeps output, broken user scope doesn't lose system, missing binary. `go run ./cmd/bluefin-report --print-summary` on this host: Bluefin 20261031 (dakota-gaming), 6136 system / 3431 user metrics, 8 sources, 2 failed units, Journal unreachable. |
 | 2 | **Privacy** — ✅ done | `go test -race ./internal/privacy`: hostname (incl. systemd `\x2d`-escaped form in unit names), machine/boot ID, machine-info, username, IPv4/IPv6, MAC, email and home paths removed; `getty@tty1.service`-style template units kept; `io.systemd.Files.*` and user scope opt-in; budget omits whole families largest-first and stays valid JSON. Real host, both scopes: no hostname/machine-id/boot-id/username in output; 893 KB after omitting `ActiveTimestamp` and `InactiveExitTimestamp`. |
 | 3 | **Overview + Metrics UI** — ✅ done | Driven via AT-SPI (final pass in an isolated headless mutter session): overview loads in ~150 ms, failed units and unreachable sources shown, Metrics name+value rows searchable over ~9,500 metrics and readable at 360×294, missing-binary status page (`BLUEFIN_REPORT_SYSTEMD_REPORT=/nonexistent`), Keyboard Shortcuts dialog, Ctrl+R/F5/Ctrl+F/Ctrl+?/F1/Ctrl+Return/Ctrl+W/Ctrl+Q. One `glib.SourceFunc` for all main-thread work (puregotk's 2000-callback table), tested with 5000 posts. |
-| 4 | **Compose + Review + Export** — ✅ done | Driven: Review gated on title or a valid same-repo issue link, Export/Publish reachable at 360×294, attachment has no hostname/username/machine-id, editing issue text clears both consents, Confirm has no attachment, exported file (0600) byte-size equals the reviewed payload. |
+| 4 | **Compose + Review + Export** — ✅ done | Driven: Review gated on title or a valid same-repo issue link, Export/Publish reachable at 360×294, attachment has no hostname/username/machine-id, editing issue text clears both consents, exported file (0600) byte-size equals the reviewed payload. Confirm Existing Issue now also attaches the reporter's own report (`systemd-report-<id>.json`) and screenshots to that issue (tests only, not yet driven in the GUI). |
 | 5 | **Publish** — ✅ done (no real publish yet) | `go test -race ./internal/publish`: REST lookups (not search) for gist/issue/comment, any failure → Uncertain, retry/resume by report ID never duplicates, issue refs validated and passed after `--`, signed-out resume → sign-in. Driven against a fake `gh`: device-code sign-in parsed from real `gh` output, failure → Drafts → relaunch → Resume (one more issue create, no second gist), Discard. **Open:** a real publish to a sandbox repo by a human. |
 | 6 | **Packaging** — 🟡 in review | v0.1.0 released by goreleaser (amd64/arm64); cask install/uninstall verified from a local tap; CI validates desktop file and metainfo. Waiting on homebrew-tap#40 and .project#31. |
 
@@ -252,6 +261,6 @@ Bonedigger and `ujust report` are unchanged.
 
 ## 11. Open decisions
 
-1. App name and ID — `Bluefin Report` / `io.projectbluefin.Report` proposed; beta 1's `systemd-report-gui` reads as an upstream systemd project.
+1. App name and ID — user-visible name `Report a problem`, app id `io.projectbluefin.Report`, binary `bluefin-report`. .desktop is in Utility;X-GNOME-Utilities (GNOME Utilities folder).
 2. Hive marker format for queue preference — needs the Hive owner's answer.
 3. Whether to attach user-scope report by default (it names user units; less sensitive than system, still personal).

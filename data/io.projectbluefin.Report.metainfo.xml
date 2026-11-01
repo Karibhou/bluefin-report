@@ -3,11 +3,28 @@
   <id>io.projectbluefin.Report</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
-  <name>Bluefin Report</name>
-  <summary>Review and share system health reports</summary>
+  <name>Report a problem</name>
+  <summary>Report bugs, crashes and freezes with a reviewed system report</summary>
   <description>
-    <p>Bluefin Report collects a systemd-report snapshot of your system, lets you review exactly what will be shared, and files it as a GitHub issue or confirmation comment.</p>
+    <p>Report a problem collects a systemd-report snapshot of your system, lets you review exactly what will be shared, and files it as a GitHub issue, or adds your report to an existing issue.</p>
   </description>
+  <keywords>
+    <keyword>bug</keyword>
+    <keyword>crash</keyword>
+    <keyword>freeze</keyword>
+    <keyword>error</keyword>
+    <keyword>issue</keyword>
+    <keyword>problem</keyword>
+    <keyword>report</keyword>
+    <keyword>feedback</keyword>
+    <keyword>support</keyword>
+    <keyword>help</keyword>
+    <keyword>logs</keyword>
+    <keyword>diagnostics</keyword>
+    <keyword>troubleshoot</keyword>
+    <keyword>GitHub</keyword>
+    <keyword>systemd</keyword>
+  </keywords>
   <developer id="io.projectbluefin">
     <name>Project Bluefin</name>
   </developer>

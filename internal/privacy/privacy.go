@@ -16,29 +16,34 @@ import (
 	"github.com/projectbluefin/bluefin-report/internal/snapshot"
 )
 
-// MaxBytes is the default attachment budget.
-const MaxBytes = 1 << 20
+// MaxBytes is the default attachment budget: 1 MiB minus room for the ```json fence
+// publish wraps it in, so the GitHub artifact body stays under 1 MiB.
+const MaxBytes = 1<<20 - 4<<10
 
 // Options are the user's choices in Review.
 type Options struct {
-	Username    string   // login name to scrub wherever it appears
-	IncludeUser bool     // attach the user-scope report
-	KeepFiles   []string // io.systemd.Files.* families the user explicitly opted in
-	MaxBytes    int      // 0 means MaxBytes
+	Username    string            // login name to scrub wherever it appears
+	IncludeUser bool              // attach the user-scope report
+	KeepFiles   []string          // io.systemd.Files.* families the user explicitly opted in
+	MaxBytes    int               // 0 means MaxBytes
+	Extras      map[string]string // opt-in sections (extras.Sections keys); redacted like metrics
 }
 
 // Payload is what Review shows and Publish sends, byte for byte.
 type Payload struct {
 	JSON    []byte
-	Removed map[string]int // rule → number of values removed or rewritten
-	Omitted []string       // families dropped to fit the budget
+	Removed map[string]int    // rule → number of values removed or rewritten
+	Omitted []string          // families dropped to fit the budget
+	Extras  map[string]string // Options.Extras after redaction, for the issue body
 }
 
 type document struct {
-	MediaType       string           `json:"mediaType"`
-	System          snapshot.Report  `json:"system"`
-	User            *snapshot.Report `json:"user,omitempty"`
-	OmittedFamilies []string         `json:"omittedFamilies,omitempty"`
+	MediaType string `json:"mediaType"`
+	// Extras comes first so the size-limited Review preview always shows the opt-in diagnostics.
+	Extras          map[string]string `json:"extras,omitempty"`
+	System          snapshot.Report   `json:"system"`
+	User            *snapshot.Report  `json:"user,omitempty"`
+	OmittedFamilies []string          `json:"omittedFamilies,omitempty"`
 }
 
 // dropped families identify the machine and have no diagnostic value for a public report.
@@ -87,6 +92,12 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 		u := r.report(s.User, opt.KeepFiles)
 		doc.User = &u
 	}
+	if len(opt.Extras) > 0 {
+		doc.Extras = map[string]string{}
+		for k, v := range opt.Extras {
+			doc.Extras[k] = r.text(v)
+		}
+	}
 
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -106,7 +117,7 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 			return Payload{}, err
 		}
 	}
-	return Payload{JSON: out, Removed: r.removed, Omitted: doc.OmittedFamilies}, nil
+	return Payload{JSON: out, Removed: r.removed, Omitted: doc.OmittedFamilies, Extras: doc.Extras}, nil
 }
 
 type redactor struct {
@@ -135,12 +146,13 @@ func (r *redactor) report(in snapshot.Report, keep []string) snapshot.Report {
 			r.removed["identifying metric"]++
 			continue
 		}
-		m.Object = r.text(m.Object)
+		net := strings.HasPrefix(m.Name, "io.systemd.Network.")
+		m.Object = r.text(r.virtualIf(net, m.Object))
 		if len(m.Fields) > 0 {
 			f := make(map[string]any, len(m.Fields))
 			for k, v := range m.Fields {
 				if s, ok := v.(string); ok {
-					v = r.text(s)
+					v = r.text(r.virtualIf(net, s))
 				}
 				f[k] = v
 			}
@@ -153,6 +165,17 @@ func (r *redactor) report(in snapshot.Report, keep []string) snapshot.Report {
 		out.Metrics = append(out.Metrics, m)
 	}
 	return out
+}
+
+// reVirtualIf matches VPN/container/bridge interface names, which reveal network setup.
+var reVirtualIf = regexp.MustCompile(`^(lo|tun[0-9]*|tap[0-9]*|utun[0-9]*|wg[0-9]*|tailscale[0-9]*|proton[0-9]*|nordlynx|ipsec[0-9]*|zt[a-z0-9]*|ppp[0-9]*|docker[0-9]*|veth.*|virbr[0-9]*|vnet[0-9]*|br-.*|cni[0-9]*|flannel.*|kube.*)$`)
+
+func (r *redactor) virtualIf(network bool, s string) string {
+	if !network || !reVirtualIf.MatchString(s) {
+		return s
+	}
+	r.removed["virtual interface"]++
+	return "[virtual-if]"
 }
 
 func dropped(name string) bool {
