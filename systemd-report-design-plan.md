@@ -287,5 +287,5 @@ Status: **Kept** = shipped, possibly reshaped. **Follow-up** = belongs to the cu
 | HTTPS/mTLS upload profiles (`--url`, `--cert`, `--key`, `--trust`) | Deferred | §1 non-goal for end users (fleet use, needs client certs). Possible later. |
 | `report.files` manager with Polkit | Rejected | §1: no root, no polkit policy. `io.systemd.Files.*` stays opt-in per entry (§6). |
 | Periodic reporting `.timer` control | Rejected | Enabling a system timer needs privilege (§1: no root) and serves fleets, not a user filing one bug. |
-| Companion tools: `systemd-analyze security`/`plot`/`blame`, `systemd-pcrlock`/`systemd-measure`, `systemd-cgtop`, `varlinkctl` | Rejected | Inspector features, not reporting. A single read-only diagnostic may still be proposed, in its own issue, as one more opt-in report extra (existing ones: boot errors, crashes, Flatpaks; see `internal/extras`). |
+| Companion tools: `systemd-analyze security`/`plot`/`blame`, `systemd-pcrlock`/`systemd-measure`, `systemd-cgtop`, `varlinkctl` | Rejected | Inspector features, not reporting. A single read-only diagnostic may still be proposed, in its own issue, as one more opt-in report extra (existing ones: boot errors, crashes, GNOME extensions, Flatpaks; see `internal/extras`). |
 | Four-view `AdwNavigationSplitView` | Rejected | §4: replaced by the `AdwNavigationView` journey. |
