@@ -73,10 +73,10 @@ AdwApplicationWindow
         │     AdwToolbarView + AdwHeaderBar [Refresh] [menu: Drafts, Keyboard Shortcuts, About]
         │     AdwBanner (dry-run / partial snapshot)
         │     AdwPreferencesPage (clamped)
-        │       Group "This system": image, version, kernel, arch, uptime   (AdwActionRow)
-        │       Group "Health": failed units, unreachable sources            (AdwActionRow → detail)
-        │       Group "Get help": [Report a Problem] [Confirm Existing Issue] (suggested-action pill)
-        │       Group: "Browse all metrics" →                                (AdwActionRow, go-next)
+        │       Heading + description (target repo, review promise) + [Report a Problem] (the one suggested-action pill)
+        │       Group "Already Reported?": Confirm Existing Issue →, Update Your Issue →   (AdwActionRow, subtitle says who it's for)
+        │       Group "System Health": failed units, warnings; "Get Help Fixing This" → only when there are problems
+        │       Group "This System": System Details (AdwExpanderRow, collapsed), Browse All Metrics →
         ├── Metrics (pushed)    GtkSearchBar + GtkListView (virtualized) grouped by source
         ├── Compose (pushed)    mode-specific form → [Review…]
         ├── Review (pushed)     AdwViewStack: Issue text | Attachment | What was removed
@@ -224,7 +224,7 @@ Match ChairLift where it is load-bearing, and only there.
 - **Bindings:** `codeberg.org/puregotk/puregotk/v4/{gtk,adw,gio,glib,gobject}`. Beta 1's `github.com/jwijenbergh/puregotk` path is wrong.
 - **Threading:** `github.com/frostyard/snowkit/gtk.RunOnMainThread`. That and `gobj`/`toast.Notifier` are all snowkit provides — it has no preference-group builders or YAML validation (beta 1 claimed both).
 - **Callback discipline:** puregotk caches callbacks in a fixed 2000-slot table that is never freed. Connect every signal once at build time; row actions go through list-item factories and a static router. This is why §4 uses `GtkListView`.
-- **Runtime requirements:** host `libgtk-4.so.1`, `libadwaita-1.so.0` (≥ 1.6 for `AdwBreakpoint`/current dialogs), systemd 262. "Cgo-free" does not mean self-contained.
+- **Runtime requirements:** host `libgtk-4.so.1`, `libadwaita-1.so.0` (≥ 1.8 for `AdwShortcutsDialog`), systemd 262. "Cgo-free" does not mean self-contained.
 - **Configuration:** none in v1. Beta 1's YAML file toggled UI groups and carried a `blocked_org_prefixes` list; both are config for values that do not change. The org allow-list is a constant. Add `/etc/bluefin-report/config.yml` when an image actually needs to hide something.
 - **GSettings:** only window size and last-used profile. If nothing else needs it, use a small state file instead and skip schema install entirely.
 - **Distribution:** Linux cask `Casks/bluefin-report.rb` in `projectbluefin/homebrew-tap`, following `chairlift.rb`: `arch arm: "arm64", intel: "amd64"`, `depends_on :linux`, desktop file and icons installed to `~/.local/share` in `postflight`, removed on uninstall, launcher wrapper that runs `brew shellenv` so `gh` is found. Bumps arrive via the tap's existing `mergeraptor` autobump + automerge.
@@ -261,6 +261,6 @@ Bonedigger and `ujust report` are unchanged.
 
 ## 11. Open decisions
 
-1. App name and ID — user-visible name `Report a problem`, app id `io.projectbluefin.Report`, binary `bluefin-report`. .desktop is in Utility;X-GNOME-Utilities (GNOME Utilities folder).
+1. App name and ID — user-visible name `Report a Problem` (HIG header capitalization), app id `io.projectbluefin.Report`, binary `bluefin-report`. .desktop is in Utility;X-GNOME-Utilities (GNOME Utilities folder).
 2. Hive marker format for queue preference — needs the Hive owner's answer.
 3. Whether to attach user-scope report by default (it names user units; less sensitive than system, still personal).

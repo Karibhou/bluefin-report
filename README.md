@@ -1,4 +1,4 @@
-# Report a problem (bluefin-report)
+# Report a Problem (bluefin-report)
 
 A GTK4/Libadwaita app that turns a [`systemd-report`](https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html)
 snapshot into a reviewed, privacy-scrubbed GitHub issue. You see exactly what
@@ -17,7 +17,7 @@ refresh this gallery. The checked-in gallery updates when that PR is merged.
 ## Requirements
 
 - systemd 261 or newer with `systemd-report` (Dakota ships 262, Utah 261)
-- GTK 4 and libadwaita 1 (≥ 1.6) shared libraries from your OS
+- GTK 4 and libadwaita 1 (≥ 1.8, required by Keyboard Shortcuts) shared libraries from your OS
 - [`gh`](https://cli.github.com/) — sign-in happens inside the app
 
 ## Install
@@ -34,9 +34,24 @@ bluefin-report --dry-run         # full flow, but gh calls are logged, not run
 bluefin-report --print-summary   # collect a snapshot and print the overview, no UI
 ```
 
+Collection keeps system and user scopes separate: missing or malformed report
+output produces a scoped warning without discarding the healthy scope. A valid
+report with an empty metrics array is accepted, and numeric metric fields retain
+their original JSON precision. A missing `systemd-report` executable is reported
+as not installed; permission or executable-format failures stop collection.
+Nonzero exits can still supply usable reports, with the failure shown as a warning.
+
 Browse All Metrics filters the collected snapshot as you type. Each row has a
 Copy button for its complete value, including text shortened on screen. An empty
 search result explains how to recover; an empty collection is shown separately.
+
+Overview leads with Report a Problem. Under Already Reported?, Confirm Existing
+Issue adds your report to someone else's issue, and Update Your Issue lets the
+person who opened an issue post an updated reviewed report to it, for example
+after rebooting, with its own artifact and comment.
+When Overview shows a problem, Get Help Fixing This copies a short summary
+(image plus failed-unit and warning counts, no unit names) and runs
+`chairlift --ask-bluefin`; Control Center opens its assistant or walks through its setup.
 
 ## Privacy
 
@@ -74,7 +89,9 @@ search result explains how to recover; an empty collection is shown separately.
   copied into the draft until published.
 - Raw snapshots stay in memory. Drafts keep only the reviewed payload under
   `$XDG_STATE_HOME/bluefin-report/drafts/` (mode 0700/0600). Discarding a
-  draft never deletes anything already on GitHub.
+  draft can be undone from its toast; its files are deleted only when the toast
+  goes away (or the window closes). It never deletes anything already on GitHub.
+  The window size is kept in `$XDG_STATE_HOME/bluefin-report/window.json` (not under `--dry-run`).
 
 ## Development
 

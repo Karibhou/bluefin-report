@@ -94,7 +94,23 @@ func TestCollectOnlyOptedIn(t *testing.T) {
 		t.Fatalf("%v %v", got, *calls)
 	}
 	md := Markdown(got)
-	if !strings.Contains(md, "<details><summary>Crashes in the last 7 days</summary>") || strings.Contains(md, "Flatpak") {
+	if !strings.Contains(md, "<details><summary>Crashes in the Last 7 Days</summary>") || strings.Contains(md, "Flatpak") {
 		t.Fatalf("markdown: %s", md)
+	}
+}
+
+// Diagnostic output lands verbatim inside a code fence in a public issue body, so a
+// line of backticks in it must not close the fence, and an opted-in section that
+// printed nothing must still say so instead of rendering an empty block.
+func TestMarkdownEscapesFencesAndMarksEmpty(t *testing.T) {
+	md := Markdown(map[string]string{
+		"crashes":    "a\n```\n# injected heading\n```",
+		"bootErrors": "",
+		"flatpaks":   "org.example.App 1.0",
+	})
+	want := "\n\n<details><summary>Errors From This Boot</summary>\n\n```\n(none)\n```\n\n</details>" +
+		"\n\n<details><summary>Crashes in the Last 7 Days</summary>\n\n```\na\n'''\n# injected heading\n'''\n```\n\n</details>"
+	if md != want {
+		t.Fatalf("markdown:\n%q\nwant:\n%q", md, want)
 	}
 }

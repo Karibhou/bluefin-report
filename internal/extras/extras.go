@@ -136,10 +136,10 @@ type Section struct {
 }
 
 var Sections = []Section{
-	{"bootErrors", "Errors from this boot", true, []string{"journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short", "--no-hostname"}},
-	{"crashes", "Crashes in the last 7 days", true, []string{"coredumpctl", "list", "--no-pager", "--since", "-7d"}},
-	{"gnomeExtensions", "Enabled GNOME extensions", false, []string{"gnome-extensions", "list", "--enabled"}},
-	{"flatpaks", "Installed Flatpak apps", false, []string{"flatpak", "list", "--app", "--columns=application,version"}},
+	{"bootErrors", "Errors From This Boot", true, []string{"journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short", "--no-hostname"}},
+	{"crashes", "Crashes in the Last 7 Days", true, []string{"coredumpctl", "list", "--no-pager", "--since", "-7d"}},
+	{"gnomeExtensions", "Enabled GNOME Extensions", false, []string{"gnome-extensions", "list", "--enabled"}},
+	{"flatpaks", "Installed Flatpak Apps", false, []string{"flatpak", "list", "--app", "--columns=application,version"}},
 }
 
 // Collect runs only the sections whose keys are given. Call it off the main thread.
