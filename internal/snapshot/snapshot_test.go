@@ -2,14 +2,19 @@ package snapshot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+const emptyReportJSON = `{"mediaType":"application/vnd.io.systemd.report","timestamp":"Sun 2026-11-01 00:37:49 UTC","metrics":[]}`
 
 // fake answers systemd-report calls from testdata, keyed by "<scope> <verb>".
 type fake struct {
@@ -88,11 +93,62 @@ func TestTakeSummarisesBothScopesAndReportsUnreachableSources(t *testing.T) {
 }
 
 func TestTakeNotInstalled(t *testing.T) {
-	missing := func(context.Context, ...string) ([]byte, []byte, error) {
-		return nil, nil, &fs.PathError{Op: "fork/exec", Path: Binary, Err: fs.ErrNotExist}
+	for _, missingErr := range []error{
+		&fs.PathError{Op: "fork/exec", Path: Binary, Err: fs.ErrNotExist},
+		&exec.Error{Name: Binary, Err: exec.ErrNotFound},
+	} {
+		missing := func(context.Context, ...string) ([]byte, []byte, error) {
+			return nil, nil, missingErr
+		}
+		if _, err := Take(context.Background(), missing, nil); !errors.Is(err, ErrNotInstalled) {
+			t.Fatalf("err = %v, want ErrNotInstalled for %v", err, missingErr)
+		}
 	}
-	if _, err := Take(context.Background(), missing, nil); !errors.Is(err, ErrNotInstalled) {
-		t.Fatalf("err = %v, want ErrNotInstalled", err)
+}
+
+func TestTakeCannotStartBinary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode fs.FileMode
+		want error
+	}{
+		{name: "permission denied", mode: 0600, want: fs.ErrPermission},
+		{name: "invalid executable format", mode: 0700, want: syscall.ENOEXEC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldBinary := Binary
+			Binary = filepath.Join(t.TempDir(), "systemd-report")
+			t.Cleanup(func() { Binary = oldBinary })
+			if err := os.WriteFile(Binary, []byte("not an executable\n"), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+
+			s, err := Take(context.Background(), Run, nil)
+			if !errors.Is(err, tc.want) || errors.Is(err, ErrNotInstalled) {
+				t.Fatalf("err = %v, want fatal %v (not ErrNotInstalled)", err, tc.want)
+			}
+			if !s.TakenAt.IsZero() {
+				t.Fatalf("startup failure returned a successful or partial snapshot: %+v", s)
+			}
+		})
+	}
+}
+
+func TestTakeStartupFailureInAnyCallIsFatal(t *testing.T) {
+	for _, key := range []string{"system generate", "system list-sources", "user generate", "user list-sources"} {
+		t.Run(key, func(t *testing.T) {
+			f := realHost()
+			f.err = map[string]error{
+				key: &fs.PathError{Op: "fork/exec", Path: Binary, Err: fs.ErrPermission},
+			}
+			s, err := Take(context.Background(), f.run, nil)
+			if !errors.Is(err, fs.ErrPermission) {
+				t.Fatalf("err = %v, want fatal permission error", err)
+			}
+			if !s.TakenAt.IsZero() {
+				t.Fatalf("startup failure returned a partial snapshot: %+v", s)
+			}
+		})
 	}
 }
 
@@ -132,6 +188,106 @@ func TestTakeSurvivesBrokenUserScope(t *testing.T) {
 	}
 }
 
+func TestTakeWarnsForMissingOrInvalidGenerateEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+	}{
+		{name: "blank", output: ""},
+		{name: "whitespace", output: " \n\t"},
+		{name: "null", output: "null"},
+		{name: "empty object", output: "{}"},
+		{name: "missing media type", output: `{"timestamp":"now","metrics":[]}`},
+		{name: "wrong media type", output: `{"mediaType":"text/plain","timestamp":"now","metrics":[]}`},
+		{name: "missing timestamp", output: `{"mediaType":"application/vnd.io.systemd.report","metrics":[]}`},
+		{name: "blank timestamp", output: `{"mediaType":"application/vnd.io.systemd.report","timestamp":" ","metrics":[]}`},
+		{name: "missing metrics", output: `{"mediaType":"application/vnd.io.systemd.report","timestamp":"now"}`},
+		{name: "null metrics", output: `{"mediaType":"application/vnd.io.systemd.report","timestamp":"now","metrics":null}`},
+		{name: "invalid metrics", output: `{"mediaType":"application/vnd.io.systemd.report","timestamp":"now","metrics":{}}`},
+		{name: "invalid JSON", output: "not json"},
+		{name: "array", output: "[]"},
+		{name: "trailing document", output: emptyReportJSON + "\nnull"},
+		{name: "trailing junk", output: emptyReportJSON + "\njunk"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, scope := range []Scope{System, User} {
+				t.Run(string(scope), func(t *testing.T) {
+					f := realHost()
+					f.stderr = nil
+					f.stdout[string(scope)+" generate"] = "=" + tc.output
+					s, err := Take(context.Background(), f.run, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					broken := s.System
+					if scope == User {
+						broken = s.User
+						if s.Summary().ImageID != "dakota-gaming" {
+							t.Error("healthy system scope lost")
+						}
+					} else if len(s.User.Metrics) == 0 || s.User.Metrics[0].String() != "running" {
+						t.Error("healthy user scope lost")
+					}
+					if broken.MediaType != "" || broken.Timestamp != "" || broken.Metrics != nil {
+						t.Errorf("invalid scope retained a partial report: %+v", broken)
+					}
+					if len(s.Warnings) != 1 || !strings.HasPrefix(s.Warnings[0], string(scope)+" generate: unreadable output:") {
+						t.Errorf("missing scoped warning: %v", s.Warnings)
+					}
+					if len(s.Summary().Warnings) != 1 {
+						t.Error("invalid output appears healthy in the overview")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestTakeAcceptsEmptyMetricsReport(t *testing.T) {
+	f := realHost()
+	f.stderr = nil
+	f.stdout["system generate"] = "=" + emptyReportJSON + " \n\t"
+	f.stdout["user generate"] = "=" + emptyReportJSON
+	s, err := Take(context.Background(), f.run, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Warnings) != 0 {
+		t.Fatalf("valid empty report produced warnings: %v", s.Warnings)
+	}
+	for _, report := range []Report{s.System, s.User} {
+		if report.MediaType != "application/vnd.io.systemd.report" || report.Timestamp == "" || report.Metrics == nil || len(report.Metrics) != 0 {
+			t.Errorf("valid empty report was discarded: %+v", report)
+		}
+	}
+}
+
+func TestTakePreservesNumericFieldsThroughMarshal(t *testing.T) {
+	f := realHost()
+	f.stderr = nil
+	f.stdout["system generate"] = `={"mediaType":"application/vnd.io.systemd.report","timestamp":"now","metrics":[{"name":"io.systemd.Test.Counter","fields":{"count":18446744073709551615,"nested":{"count":9007199254740993},"array":[9007199254740995]},"value":18446744073709551615}]}`
+	s, err := Take(context.Background(), f.run, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Warnings) != 0 || len(s.System.Metrics) != 1 {
+		t.Fatalf("numeric report not collected: warnings=%v report=%+v", s.Warnings, s.System)
+	}
+	m := s.System.Metrics[0]
+	if count, ok := m.Fields["count"].(json.Number); !ok || count.String() != "18446744073709551615" {
+		t.Errorf("numeric field rounded or converted: %#v", m.Fields["count"])
+	}
+	b, err := json.Marshal(s.System)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{`"count":18446744073709551615`, `"count":9007199254740993`, `"array":[9007199254740995]`, `"value":18446744073709551615`} {
+		if !strings.Contains(string(b), token) {
+			t.Errorf("marshal lost original numeric token %s: %s", token, b)
+		}
+	}
+}
+
 func TestDescribeReadsJSONSeq(t *testing.T) {
 	f := fake{stdout: map[string]string{"system describe": "describe-system.seq"}}
 	fams, warn, err := Describe(context.Background(), f.run, System)
@@ -140,6 +296,19 @@ func TestDescribeReadsJSONSeq(t *testing.T) {
 	}
 	if len(fams) != 2 || fams["io.systemd.Basic.CPUUsage"].Type != "counter" {
 		t.Errorf("fams = %+v", fams)
+	}
+}
+
+func TestDescribeCannotStartBinary(t *testing.T) {
+	f := fake{err: map[string]error{
+		"system describe": &exec.Error{Name: Binary, Err: fs.ErrPermission},
+	}}
+	fams, warn, err := Describe(context.Background(), f.run, System)
+	if !errors.Is(err, fs.ErrPermission) || errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("err = %v, want fatal permission error", err)
+	}
+	if fams != nil || len(warn) != 0 {
+		t.Fatalf("startup failure returned partial metadata: families=%v warnings=%v", fams, warn)
 	}
 }
 
