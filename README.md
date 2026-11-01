@@ -72,7 +72,9 @@ search result explains how to recover; an empty collection is shown separately.
   copied into the draft until published.
 - Raw snapshots stay in memory. Drafts keep only the reviewed payload under
   `$XDG_STATE_HOME/bluefin-report/drafts/` (mode 0700/0600). Discarding a
-  draft never deletes anything already on GitHub.
+  draft can be undone from its toast; its files are deleted only when the toast
+  goes away (or the window closes). It never deletes anything already on GitHub.
+  The window size is kept in `$XDG_STATE_HOME/bluefin-report/window.json` (not under `--dry-run`).
 
 ## Development
 

@@ -6,6 +6,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -155,9 +156,10 @@ type ui struct {
 	draftsGrp   *adw.PreferencesGroup
 	draftList   *gtk.ListBox
 	draftsStack *gtk.Stack // "list" or "empty"
-	discardDlg  *adw.AlertDialog
-	discardID   string
 	discardAct  *gio.SimpleAction
+	discarded   map[uintptr]string // undo toast → report ID: hidden from Drafts, deleted when the toast goes without Undo
+	onUndo      *func(adw.Toast)   // connected to every undo toast; one callback for all, keyed by toast pointer
+	onDismissed *func(adw.Toast)
 
 	// sign-in
 	signInDlg  *adw.AlertDialog
@@ -198,8 +200,22 @@ func (u *ui) activate() {
 		u.stateDir = d
 	}
 	u.win = adw.NewApplicationWindow(&u.app.Application)
-	u.win.SetDefaultSize(720, 760)
 	u.win.SetSizeRequest(360, 294)
+	ws := windowState{Width: 720, Height: 760}
+	if !u.dryRun { // dry runs (tests, screenshots) always use the default size
+		ws = loadWindowState()
+	}
+	u.win.SetDefaultSize(int32(ws.Width), int32(ws.Height))
+	if ws.Maximized {
+		u.win.Maximize()
+	}
+	u.win.ConnectCloseRequest(hold(func(gtk.Window) bool {
+		u.toasts.DismissAll() // runs pending discards: closing is not an Undo
+		if !u.dryRun {
+			saveWindowState(&u.win.Window)
+		}
+		return false
+	}))
 	u.win.SetTitle(appName)
 
 	u.nav = adw.NewNavigationView()
@@ -267,15 +283,23 @@ func (u *ui) activate() {
 			u.toast("Wait for publishing to finish")
 			return
 		}
-		u.discardID = id
-		u.discardDlg.Present(&u.win.Widget)
+		t := adw.NewToast("Report discarded")
+		t.SetButtonLabel("_Undo")
+		t.SetTimeout(0) // stays until Undo, close or the next toast: 5 s is too short to reach by keyboard
+		t.ConnectButtonClicked(u.onUndo)
+		t.ConnectDismissed(u.onDismissed)
+		u.discarded[t.Ptr] = id
+		log.Printf("ui: draft %s discarded, undo available", id)
+		u.refreshDrafts()
+		u.toasts.AddToast(t)
 	})
 	stringAction("shot-remove", func(path string) {
 		u.shots = slices.DeleteFunc(u.shots, func(p string) bool { return p == path })
 		u.syncShots()
 	})
 	quit := gio.NewSimpleAction("quit", nil)
-	quit.ConnectActivate(hold(func(gio.SimpleAction, uintptr) { u.app.Quit() }))
+	// Close, not Quit: close-request saves the window size and runs pending discards.
+	quit.ConnectActivate(hold(func(gio.SimpleAction, uintptr) { u.win.Close() }))
 	u.app.AddAction(quit)
 	u.app.SetAccelsForAction("win.refresh", []string{"<Control>r", "F5"})
 	u.app.SetAccelsForAction("win.find", []string{"<Control>f"})
@@ -502,6 +526,7 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 			u.statusPage.SetDescription(err.Error())
 		}
 		u.ovStack.SetVisibleChildName("error")
+		u.announce(u.statusPage.GetTitle())
 		return
 	}
 	u.snap = &s
@@ -562,6 +587,17 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	u.syncResults()
 	u.ovStack.SetVisibleChildName("ready")
 	u.syncReview()
+	units := "units"
+	if len(u.sum.FailedUnits) == 1 {
+		units = "unit"
+	}
+	u.announce(fmt.Sprintf("System report collected: %d failed %s", len(u.sum.FailedUnits), units))
+}
+
+// announce tells assistive technologies about a change nothing else focuses.
+func (u *ui) announce(msg string) {
+	log.Printf("ui: announce: %s", msg)
+	u.win.Announce(msg, gtk.AccessibleAnnouncementPriorityMediumValue)
 }
 
 // ---------- Metrics ----------
@@ -1245,31 +1281,47 @@ func (u *ui) buildDrafts() {
 	u.draftsStack.AddNamed(&empty.Widget, "empty")
 	u.nav.Add(u.page("Drafts", "drafts", nil, &u.draftsStack.Widget))
 
-	u.discardDlg = adw.NewAlertDialog("Discard Draft?", "The local copy is deleted. Anything already published stays on GitHub.")
-	u.discardDlg.Ref() // reused: keep it alive between presentations
-	u.discardDlg.AddResponse("cancel", "_Cancel")
-	u.discardDlg.AddResponse("discard", "_Discard")
-	u.discardDlg.SetResponseAppearance("discard", adw.ResponseDestructiveValue)
-	u.discardDlg.SetCloseResponse("cancel")
-	u.discardDlg.ConnectResponse(hold(func(_ adw.AlertDialog, r string) {
-		if r != "discard" || u.publishing {
+	// Discard is undoable: the draft leaves the list at once and its files go
+	// only when the toast is dismissed without Undo (or the window closes).
+	u.discarded = map[uintptr]string{}
+	u.onUndo = hold(func(t adw.Toast) {
+		log.Printf("ui: discard of draft %s undone", u.discarded[t.Ptr])
+		delete(u.discarded, t.Ptr) // button-clicked precedes dismissed, which then finds nothing to delete
+		u.refreshDrafts()
+	})
+	u.onDismissed = hold(func(t adw.Toast) {
+		id, ok := u.discarded[t.Ptr]
+		if !ok {
 			return
 		}
-		log.Printf("ui: discarding draft %s", u.discardID)
-		if err := publish.Discard(u.stateDir, u.discardID); err != nil {
-			u.showError("Couldn't Discard Draft", err.Error())
+		delete(u.discarded, t.Ptr)
+		if u.publishing { // the draft may be the report now publishing; keep it
+			log.Printf("ui: keeping draft %s: publishing", id)
+		} else {
+			log.Printf("ui: deleting draft %s", id)
+			if err := publish.Discard(u.stateDir, id); err != nil {
+				u.showError("Couldn't Discard Draft", err.Error())
+			}
 		}
 		u.refreshDrafts()
-		u.toast("Draft discarded")
-	}))
+	})
 }
 
-// refreshDrafts rebuilds the Drafts list and the Overview row from disk.
+// refreshDrafts rebuilds the Drafts list and the Overview row from disk,
+// leaving out drafts whose discard can still be undone.
 func (u *ui) refreshDrafts() {
 	ds, err := publish.Pending(u.stateDir)
 	if err != nil {
 		log.Print("ui: drafts: ", err)
 	}
+	ds = slices.DeleteFunc(ds, func(s publish.Saved) bool {
+		for _, id := range u.discarded {
+			if id == s.ReportID {
+				return true
+			}
+		}
+		return false
+	})
 	log.Printf("ui: %d unfinished drafts", len(ds))
 	u.draftsCount.SetText(fmt.Sprint(len(ds)))
 	u.draftsGrp.SetVisible(len(ds) > 0)
@@ -1433,6 +1485,42 @@ func (u *ui) shortcuts() {
 	d := adw.NewShortcutsDialog()
 	d.Add(s)
 	d.Present(&u.win.Widget)
+}
+
+// windowState is the window size kept across runs, as GNOME apps do.
+type windowState struct {
+	Width, Height int
+	Maximized     bool
+}
+
+func windowFile() string { return filepath.Join(filepath.Dir(stateDir()), "window.json") }
+
+// loadWindowState returns the saved size, or the default when there is none or
+// it is unreadable; it never goes below the window's minimum size.
+func loadWindowState() windowState {
+	ws := windowState{Width: 720, Height: 760}
+	if b, err := os.ReadFile(windowFile()); err == nil && json.Unmarshal(b, &ws) != nil {
+		ws = windowState{Width: 720, Height: 760}
+	}
+	ws.Width, ws.Height = max(ws.Width, 360), max(ws.Height, 294)
+	return ws
+}
+
+// saveWindowState records w's unmaximized size and whether it is maximized.
+func saveWindowState(w *gtk.Window) {
+	var width, height int32
+	w.GetDefaultSize(&width, &height)
+	b, _ := json.Marshal(windowState{Width: int(width), Height: int(height), Maximized: w.IsMaximized()})
+	p := windowFile()
+	err := os.MkdirAll(filepath.Dir(p), 0o700)
+	if err == nil {
+		err = os.WriteFile(p, b, 0o600)
+	}
+	if err != nil {
+		log.Print("ui: saving window size: ", err)
+		return
+	}
+	log.Printf("ui: saved window size %s", b)
 }
 
 func stateDir() string {
