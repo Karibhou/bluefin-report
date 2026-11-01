@@ -17,8 +17,60 @@ make lint test validate-data
 ./build/bluefin-report --dry-run   # full flow; gh calls are logged, not run
 ```
 
-Releases are cut deliberately, not per commit, as calendar versions `YY.MM.N`
-(N starts at 1 each month; see `scripts/next-version.sh`). On an up-to-date, clean
-`main`, `make bump` runs lint and tests and creates the annotated tag; push it with the
-printed `git push origin YY.MM.N`. GoReleaser publishes the tarballs and `checksums.txt`,
-and the [Homebrew tap](https://github.com/projectbluefin/homebrew-tap) cask picks them up.
+## Releases
+
+Releases use calendar versions `YY.MM.N` (N starts at 1 each month), allocated by
+the existing `scripts/next-version.sh`. The Releases workflow checks on Tuesdays
+at 08:23 UTC. It skips publication when only README/gallery changes have landed
+since the latest reachable stable tag, including historical `v` tags.
+
+The release must pass lint, the full race-test suite, desktop metadata validation,
+release-planning tests, and live screenshot capture before any tag is pushed.
+GoReleaser publishes both Linux architectures, checksums, and the captured images
+with their source/binary/fixture provenance. The same workflow publishes directly
+after creating its tag: it does not depend on a second workflow being triggered
+by a `GITHUB_TOKEN` tag push.
+
+Use the **Releases** workflow's **Run workflow** control for an on-demand preview.
+`publish` defaults to false: previews build snapshot archives and screenshot
+artifacts without creating a tag, release, or README-refresh PR. PRs and merge
+groups also run read-only previews. Publishing manually requires the default
+branch and `publish: true`; scheduled releases are not cut per commit.
+
+For maintainer recovery, `make bump` still allocates an annotated tag on a clean,
+up-to-date `main` after checks. Push the printed tag command to run the same gated
+release flow. Do not hand-pick version numbers. Agents must not cut or push real
+release tags while implementing or verifying automation.
+
+### Live README screenshots
+
+`make screenshots` launches the compiled app with `--dry-run`, supplies only the
+existing snapshot test fixtures, and navigates using AT-SPI and keyboard actions.
+It captures Overview, Metrics, and Review without publishing anything. It needs
+a supported GTK/Libadwaita runtime (Libadwaita 1.8 or later), Python's PyGObject and
+pyatspi bindings, Xvfb, D-Bus/AT-SPI, xdotool, ImageMagick, and an Adwaita icon theme.
+The release workflow provides these in Fedora 44 instead of relying on an old
+runner desktop. Local captures write to `build/screenshots`; `SCREENSHOT_DIR` and
+`PYTHON` are Make overrides.
+
+On Linuxbrew, keep native library overrides confined to the app so the system
+D-Bus/accessibility daemons do not load incompatible libraries:
+
+```sh
+SCREENSHOT_LIBRARY_PATH=/home/linuxbrew/.linuxbrew/lib \
+  make screenshots PYTHON=/usr/bin/python3
+```
+
+Each published release attaches `screenshot-overview.png`, `screenshot-metrics.png`,
+`screenshot-review.png`, and `screenshot-provenance.json`. A bot opens or updates
+one PR changing only the four tracked assets under `data/screenshots`; the README
+uses those stable relative image paths. Merging that PR refreshes the gallery.
+Identical images do not open a new PR or cause another release.
+
+The README-refresh job uses the existing organization secrets
+`MERGERAPTOR_APP_ID` and `MERGERAPTOR_PRIVATE_KEY`. The GitHub App must be installed
+for this repository with **Contents: write** and **Pull requests: write**. Its
+installation token is scoped to this repository and these permissions, so the
+bot's PR triggers normal CI (unlike a PR created with `GITHUB_TOKEN`). Missing
+credentials or permissions fail the refresh job explicitly; they never authorize
+a direct write to the default branch.

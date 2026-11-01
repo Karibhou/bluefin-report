@@ -1,58 +1,254 @@
-name: goreleaser
+name: Releases
 
 on:
   push:
     tags:
       - "[0-9]*"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".goreleaser.*"
+      - "scripts/**"
+      - "cmd/**"
+      - "internal/**"
+      - "data/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - "README.md"
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "23 8 * * 2"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release (default branch only); otherwise build a snapshot
+        type: boolean
+        default: false
 
 permissions: {}
 
+# Serialize publication transactions without letting previews replace pending releases.
+# Never cancel a run that may already have pushed its tag or published its release.
+concurrency:
+  group: releases-${{ github.repository }}-${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && github.ref || 'publish' }}
+  cancel-in-progress: false
+
 jobs:
+  plan:
+    name: Select release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+      publish: ${{ steps.plan.outputs.publish }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - name: Checkout immutable event source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select stable release or snapshot
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PUBLISH: ${{ inputs.publish || false }}
+        run: python3 scripts/release-plan.py --event "$EVENT" --ref "$EVENT_REF" --sha "$EVENT_SHA" --default-branch "$DEFAULT_BRANCH" --publish "$PUBLISH"
+
   gate:
     name: Quality gate
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
-      - name: Checkout
+      - name: Checkout immutable event source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.9"
+      - name: Install desktop validation and runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils appstream libgtk-4-dev libadwaita-1-dev
+      - name: Lint, test, validate data and release selection
+        run: |
+          make lint test validate-data
+          python3 -m unittest discover -s scripts -p '*_test.py'
+      - name: Build exact screenshot binary
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p build
+          go build -trimpath -ldflags "-X github.com/projectbluefin/bluefin-report/internal/ui.Version=$RELEASE_TAG" -o build/bluefin-report ./cmd/bluefin-report
+      - name: Upload screenshot binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: screenshot-binary
+          path: build/bluefin-report
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Install desktop-file-utils
-        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils libgtk-4-dev libadwaita-1-dev
+  screenshots:
+    name: Capture live release screenshots
+    needs: [plan, gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable event source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download gated binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: screenshot-binary
+          path: build
+      - name: Capture under Fedora 44, Xvfb and isolated D-Bus
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          chmod +x build/bluefin-report
+          docker run --rm --env GITHUB_SHA="$SOURCE_SHA" --volume "$PWD:/workspace" --workdir /workspace fedora:44 bash -euo pipefail -c '
+            dnf install -y python3-gobject python3-pyatspi xdotool ImageMagick xorg-x11-server-Xvfb dbus-daemon at-spi2-core adwaita-icon-theme gtk4 libadwaita git
+            Xvfb :99 -screen 0 1440x1000x24 -nolisten tcp &
+            export DISPLAY=:99
+            ready=false
+            for attempt in {1..50}; do
+              if xdotool getdisplaygeometry >/dev/null 2>&1; then ready=true; break; fi
+              sleep 0.1
+            done
+            "$ready" || { echo "Xvfb did not become ready" >&2; exit 1; }
+            dbus-run-session -- python3 scripts/capture-screenshots.py --binary build/bluefin-report --output build/screenshots
+          '
+      - name: Upload live screenshots and provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-screenshots
+          path: |
+            build/screenshots/screenshot-overview.png
+            build/screenshots/screenshot-metrics.png
+            build/screenshots/screenshot-review.png
+            build/screenshots/screenshot-provenance.json
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Lint, test, validate data
-        run: make lint test validate-data
+  snapshot:
+    name: Build non-publishing snapshot
+    needs: [plan, gate, screenshots]
+    if: needs.plan.outputs.publish == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable event source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.9"
+          cache: false
+      - name: Build snapshot without publishing or tagging
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: "v2.18.2"
+          args: release --snapshot --clean
+        env:
+          GORELEASER_CURRENT_TAG: ${{ needs.plan.outputs.tag }}
+      - name: Upload snapshot packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: snapshot-packages
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 7
 
-  goreleaser:
-    name: Release with GoReleaser
-    needs: [gate]
+  publish:
+    name: Publish gated release
+    needs: [plan, gate, screenshots]
+    # Do not trust plan outputs to grant write access to a feature-ref dry run.
+    if: >-
+      needs.plan.outputs.publish == 'true' &&
+      (github.event_name == 'push' ||
+       (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+        (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish))))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      - name: Checkout immutable event source without credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Set up Go
+      - name: Validate trusted release boundary
+        env:
+          EVENT: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$EVENT_SHA^{commit}")" ]]
+          git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+          if [[ "$EVENT" == push ]]; then
+            [[ "$EVENT_REF" == "refs/tags/$RELEASE_TAG" ]]
+            [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$(git rev-parse HEAD)" ]]
+          else
+            [[ "$EVENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+            [[ "$RELEASE_TAG" == "$(bash scripts/next-version.sh)" ]]
+          fi
+      - name: Set up Go without caches
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.9"
-          # No caches from earlier jobs in the write-capable release build.
           cache: false
-
-      - name: Run GoReleaser
+      - name: Download gated screenshots
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-screenshots
+          path: build/screenshots
+      - name: Push generated tag only after all gates pass
+        if: github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          # The API creates the ref atomically and fails if it already exists.
+          # Continue in this run: GITHUB_TOKEN-created tags do not trigger another workflow.
+          gh api --method POST "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$EVENT_SHA"
+          git tag "$RELEASE_TAG" "$EVENT_SHA"
+      - name: Publish with GoReleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
@@ -60,3 +256,58 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ needs.plan.outputs.tag }}
+      - name: Attach the exact gated screenshots to the same release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" build/screenshots/screenshot-overview.png build/screenshots/screenshot-metrics.png build/screenshots/screenshot-review.png build/screenshots/screenshot-provenance.json --clobber
+
+  refresh-readme-images:
+    name: Propose released README images
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted release automation at immutable event SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download released screenshots
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-screenshots
+          path: build/screenshots
+      - name: Require screenshot PR App credentials
+        env:
+          APP_ID: ${{ secrets.MERGERAPTOR_APP_ID }}
+          APP_KEY: ${{ secrets.MERGERAPTOR_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$APP_ID" || -z "$APP_KEY" ]]; then
+            echo '::error::Install MERGERAPTOR with Contents and Pull requests write permissions, and configure MERGERAPTOR_APP_ID and MERGERAPTOR_PRIVATE_KEY. A GITHUB_TOKEN PR would suppress PR CI.'
+            exit 1
+          fi
+      - name: Create narrowly scoped screenshot PR token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.MERGERAPTOR_APP_ID }}
+          private-key: ${{ secrets.MERGERAPTOR_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Update only tracked README image assets through a PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 scripts/update-readme-screenshots.py --screenshots build/screenshots --release-tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"

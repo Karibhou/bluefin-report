@@ -5,6 +5,15 @@ snapshot into a reviewed, privacy-scrubbed GitHub issue. You see exactly what
 leaves the machine before anything is sent; it is published with your own `gh`
 login as an issue in the right Bluefin repository, with the full report attached.
 
+## Screenshots
+
+<img src="data/screenshots/overview.png" alt="System overview and health" width="300"> <img src="data/screenshots/metrics.png" alt="Metric explorer" width="300"> <img src="data/screenshots/review.png" alt="Privacy review before publishing" width="300">
+
+Live captures of the application with deterministic repository fixtures—not
+telemetry from a contributor's machine. Each release regenerates these views,
+attaches the PNGs and provenance to the release, and opens a pull request to
+refresh this gallery. The checked-in gallery updates when that PR is merged.
+
 ## Requirements
 
 - systemd 262 (`systemd-report`)
@@ -53,10 +62,16 @@ make test           # go test -race ./...
 make run            # build and run with --dry-run
 make lint           # gofmt + go vet
 make validate-data  # desktop-file-validate (+ appstreamcli if present)
+make screenshots    # capture the running app locally; requires Xvfb/AT-SPI
 make bump           # tag the next release, YY.MM.N (does not push)
 ```
 
-Releases use calendar versions `YY.MM.N` and are cut deliberately with `make bump`,
-not per commit. `bluefin-report --version` prints the running version.
+Releases use calendar versions `YY.MM.N`, not a release for every commit.
+The release workflow checks weekly for application changes and publishes only
+after quality checks and fresh live screenshot capture succeed. It can also be
+run manually in dry-run mode. `bluefin-report --version` prints the running version.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for release controls, screenshot runtime
+requirements, and the README-refresh bot's permissions.
 
 Licensed under Apache-2.0.
