@@ -61,6 +61,8 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PUBLISH: ${{ inputs.publish || false }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: python3 scripts/release-plan.py --event "$EVENT" --ref "$EVENT_REF" --sha "$EVENT_SHA" --default-branch "$DEFAULT_BRANCH" --publish "$PUBLISH"
 
   gate:
@@ -126,7 +128,7 @@ jobs:
         run: |
           chmod +x build/bluefin-report
           docker run --rm --env GITHUB_SHA="$SOURCE_SHA" --volume "$PWD:/workspace" --workdir /workspace fedora:44 bash -euo pipefail -c '
-            dnf install -y python3-gobject python3-pyatspi xdotool ImageMagick xorg-x11-server-Xvfb dbus-daemon at-spi2-core adwaita-icon-theme gtk4 libadwaita git
+            dnf install -y python3-gobject python3-pyatspi gobject-introspection xdotool ImageMagick xorg-x11-server-Xvfb dbus-daemon at-spi2-core adwaita-icon-theme gtk4 libadwaita git
             Xvfb :99 -screen 0 1440x1000x24 -nolisten tcp &
             export DISPLAY=:99
             ready=false
@@ -208,24 +210,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Validate trusted release boundary
+        id: boundary
         env:
           EVENT: ${{ github.event_name }}
           EVENT_REF: ${{ github.ref }}
           EVENT_SHA: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$(git rev-parse HEAD)" == "$(git rev-parse "$EVENT_SHA^{commit}")" ]]
-          git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
-          if [[ "$EVENT" == push ]]; then
-            [[ "$EVENT_REF" == "refs/tags/$RELEASE_TAG" ]]
-            [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$(git rev-parse HEAD)" ]]
-          else
-            [[ "$EVENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
-            [[ "$RELEASE_TAG" == "$(bash scripts/next-version.sh)" ]]
-          fi
+        run: scripts/release-boundary.sh
       - name: Set up Go without caches
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -237,7 +229,7 @@ jobs:
           name: release-screenshots
           path: build/screenshots
       - name: Push generated tag only after all gates pass
-        if: github.event_name != 'push'
+        if: steps.boundary.outputs.create_tag == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

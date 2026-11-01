@@ -31,6 +31,12 @@ with their source/binary/fixture provenance. The same workflow publishes directl
 after creating its tag: it does not depend on a second workflow being triggered
 by a `GITHUB_TOKEN` tag push.
 
+If a run allocates a tag but fails before publication, the next scheduled or
+manual publishing run can reuse that numeric tag only at the exact same source
+commit and only while no published stable release exists. The publication
+boundary never moves an existing tag. This recovers tag allocation, not cleanup
+of assets from a partially published release.
+
 Use the **Releases** workflow's **Run workflow** control for an on-demand preview.
 `publish` defaults to false: previews build snapshot archives and screenshot
 artifacts without creating a tag, release, or README-refresh PR. PRs and merge
@@ -48,7 +54,8 @@ release tags while implementing or verifying automation.
 existing snapshot test fixtures, and navigates using AT-SPI and keyboard actions.
 It captures Overview, Metrics, and Review without publishing anything. It needs
 a supported GTK/Libadwaita runtime (Libadwaita 1.8 or later), Python's PyGObject and
-pyatspi bindings, Xvfb, D-Bus/AT-SPI, xdotool, ImageMagick, and an Adwaita icon theme.
+pyatspi bindings, native introspection typelibs (`gobject-introspection` on Fedora),
+Xvfb, D-Bus/AT-SPI, xdotool, ImageMagick, and an Adwaita icon theme.
 The release workflow provides these in Fedora 44 instead of relying on an old
 runner desktop. Local captures write to `build/screenshots`; `SCREENSHOT_DIR` and
 `PYTHON` are Make overrides.
@@ -66,6 +73,12 @@ Each published release attaches `screenshot-overview.png`, `screenshot-metrics.p
 one PR changing only the four tracked assets under `data/screenshots`; the README
 uses those stable relative image paths. Merging that PR refreshes the gallery.
 Identical images do not open a new PR or cause another release.
+
+When newer released images already match the default branch, the updater closes
+an obsolete owned screenshot PR. Retained bot branches after a squash/rebase merge
+are reconciled with a non-forced two-parent commit using the current default tree.
+Unowned branches, ambiguous PR history, and changes outside the four screenshot
+assets fail closed rather than overwriting contributor work.
 
 The README-refresh job uses the existing organization secrets
 `MERGERAPTOR_APP_ID` and `MERGERAPTOR_PRIVATE_KEY`. The GitHub App must be installed

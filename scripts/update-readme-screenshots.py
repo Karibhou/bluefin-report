@@ -68,6 +68,16 @@ def same_images(entries, assets):
     return all(entries.get(path, {}).get("sha") == blob_sha(content) for path, content in assets.items() if path.endswith(".png"))
 
 
+def owned_pull(pull, repository, default, login, branch_sha):
+    return (pull["user"]["login"] == login
+            and pull["head"]["repo"] is not None
+            and pull["head"]["repo"]["full_name"] == repository
+            and pull["head"]["ref"] == BRANCH
+            and pull["head"]["sha"] == branch_sha
+            and pull["base"]["repo"]["full_name"] == repository
+            and pull["base"]["ref"] == default)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshots", required=True, type=Path)
@@ -98,54 +108,66 @@ def main():
     if release["draft"] or release["prerelease"]:
         raise ValueError("README images can only be refreshed from a published stable release")
     default_entries = tree_entries(repository, default_sha)
-    if same_images(default_entries, assets):
-        print("Released images already match the default branch; no branch or PR changes.")
-        return
     login = f"{slug}[bot]"
-    bot = api(f"users/{quote(login, safe='')}")
-    email = f"{bot['id']}+{login}@users.noreply.github.com"
     owner = repository.split("/")[0]
     pulls = api(f"repos/{repository}/pulls?state=open&head={quote(owner + ':' + BRANCH, safe='')}&per_page=100")
     if len(pulls) > 1:
         raise ValueError("multiple open screenshot PRs found; refusing an ambiguous update")
     pull = pulls[0] if pulls else None
-    if pull and (pull["user"]["login"] != login or pull["head"]["repo"]["full_name"] != repository or pull["base"]["ref"] != default):
-        raise ValueError("existing screenshot PR is not owned by the configured App or targets another base")
     branch_ref = api(f"repos/{repository}/git/ref/heads/{quote(BRANCH, safe='')}", allow_missing=True)
-    parent = default_sha
+    branch_sha = branch_ref["object"]["sha"] if branch_ref else None
+    if pull and not owned_pull(pull, repository, default, login, branch_sha):
+        raise ValueError("existing screenshot PR does not match the configured App, repository, base and branch head")
+    default_matches = same_images(default_entries, assets)
+    if default_matches and not pull:
+        print("Released images already match the default branch; no branch or PR changes.")
+        return
+    parents = [default_sha]
     if branch_ref:
-        branch_sha = branch_ref["object"]["sha"]
         comparison = api(f"repos/{repository}/compare/{default_sha}...{branch_sha}")
         if comparison["status"] in {"ahead", "diverged"}:
             head = api(f"repos/{repository}/commits/{branch_sha}")
-            if not pull or not head.get("author") or head["author"]["login"] != login:
-                raise ValueError("existing automation branch has unmerged work without an owned bot PR")
+            if not head.get("author") or head["author"]["login"] != login:
+                raise ValueError("existing automation branch head is not owned by the configured App")
+            if not pull:
+                closed = api(f"repos/{repository}/pulls?state=closed&head={quote(owner + ':' + BRANCH, safe='')}&per_page=100")
+                matches = [item for item in closed if owned_pull(item, repository, default, login, branch_sha)]
+                if len(closed) >= 100 or len(matches) != 1:
+                    raise ValueError("existing automation branch has no unambiguous owned PR at its exact head")
             if comparison["total_commits"] > 250 or len(comparison.get("files", [])) >= 300:
                 raise ValueError("automation branch diff exceeds safe comparison limits")
             if any(file["filename"] not in ASSETS.values() or file.get("previous_filename", file["filename"]) not in ASSETS.values() for file in comparison.get("files", [])):
                 raise ValueError("automation branch contains changes outside the four screenshot assets")
-            parent = branch_sha
+            # Keep the retained branch in history while taking all non-asset content
+            # from the current default tree, including after squash/rebase merges.
+            parents = [branch_sha, default_sha]
         elif comparison["status"] not in {"behind", "identical"}:
             raise ValueError("cannot safely fast-forward the existing automation branch")
-    entries = tree_entries(repository, parent)
+    if default_matches:
+        api(f"repos/{repository}/pulls/{pull['number']}", "PATCH", {"state": "closed"})
+        print("Released images already match the default branch; closed the obsolete bot PR.")
+        return
+    if pull and comparison["status"] in {"ahead", "diverged"} and same_images(tree_entries(repository, branch_sha), assets):
+        print(f"Released images already match the open bot PR: {pull['html_url']}")
+        return
+    entries = default_entries
     # Never overwrite symlinks, submodules or directories with screenshot assets.
     for path in assets:
         if path in entries and (entries[path]["type"] != "blob" or entries[path]["mode"] != "100644"):
             raise ValueError(f"unsafe tracked screenshot asset: {path}")
-    if pull and same_images(entries, assets):
-        print(f"Released images already match the open bot PR: {pull['html_url']}")
-        return
+    bot = api(f"users/{quote(login, safe='')}")
+    email = f"{bot['id']}+{login}@users.noreply.github.com"
     changed = [path for path, content in assets.items() if entries.get(path, {}).get("sha") != blob_sha(content)]
     if changed:
         tree = []
         for path in changed:
             blob = api(f"repos/{repository}/git/blobs", "POST", {"content": base64.b64encode(assets[path]).decode(), "encoding": "base64"})
             tree.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
-        parent_commit = api(f"repos/{repository}/git/commits/{parent}")
+        parent_commit = api(f"repos/{repository}/git/commits/{default_sha}")
         new_tree = api(f"repos/{repository}/git/trees", "POST", {"base_tree": parent_commit["tree"]["sha"], "tree": tree})
         commit = api(f"repos/{repository}/git/commits", "POST", {
             "message": f"docs: refresh screenshots for {args.release_tag}",
-            "tree": new_tree["sha"], "parents": [parent],
+            "tree": new_tree["sha"], "parents": parents,
             "author": {"name": login, "email": email},
             "committer": {"name": login, "email": email},
         })

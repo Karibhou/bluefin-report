@@ -5,6 +5,10 @@ import argparse
 import os
 import re
 import subprocess
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 
 STABLE_TAG = re.compile(r"v?[0-9]+\.[0-9]+\.[0-9]+\Z")
 NUMERIC_TAG = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
@@ -26,6 +30,26 @@ def previous_tag(exclude=""):
     if not tags:
         return ""
     return git("describe", "--tags", "--abbrev=0", *[arg for tag in tags for arg in ("--match", tag)], "HEAD")
+
+
+def published_release(tag):
+    repository = os.environ.get("GH_REPO") or os.environ.get("GITHUB_REPOSITORY")
+    token = os.environ.get("GH_TOKEN")
+    if not repository or not token:
+        raise ValueError("release recovery requires GH_REPO or GITHUB_REPOSITORY and GH_TOKEN")
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/releases/tags/{urllib.parse.quote(tag, safe='')}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            release = json.load(response)
+    except urllib.error.HTTPError as error:
+        error.close()
+        if error.code == 404:
+            return False
+        raise
+    return not release["draft"] and not release["prerelease"]
 
 
 def plan(event, ref, sha, default_branch, requested_publish):
@@ -50,6 +74,16 @@ def plan(event, ref, sha, default_branch, requested_publish):
     has_changes = any(relevant(path) for path in changed)
     # Read-only PR, merge-queue and manual previews build even docs-only refs.
     run = event == "push" or has_changes or not publish
+    # Recover only a tag allocated at this exact source commit, never an older
+    # unpublished release or a preview. All GitHub access here is read-only.
+    if (
+        publish and event != "push" and not has_changes
+        and NUMERIC_TAG.fullmatch(previous)
+        and git("rev-parse", f"refs/tags/{previous}^{{commit}}") == commit
+        and not published_release(previous)
+    ):
+        tag = previous
+        run = True
     if not tag:
         tag = subprocess.check_output(["bash", "scripts/next-version.sh"], text=True).strip()
         if not NUMERIC_TAG.fullmatch(tag):
