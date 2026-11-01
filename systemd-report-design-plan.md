@@ -264,3 +264,28 @@ Bonedigger and `ujust report` are unchanged.
 1. App name and ID — user-visible name `Report a Problem` (HIG header capitalization), app id `io.projectbluefin.Report`, binary `bluefin-report`. .desktop is in Utility;X-GNOME-Utilities (GNOME Utilities folder).
 2. Hive marker format for queue preference — needs the Hive owner's answer.
 3. Whether to attach user-scope report by default (it names user units; less sensitive than system, still personal).
+
+## 12. Scope against the original inspector prompt
+
+The project began from a [prompt](https://pastebin.com/raw/CyAf24V1) for a "systemd Inspector & Trust Center": a four-view `AdwNavigationSplitView` app with live telemetry, signing, fleet upload and admin tools. This plan deliberately builds a different product, the support-report journey of §3. A capability missing below is a scope choice, not a bug in the support-report flow; a focused audit fix does not imply building the inspector. Tracking issue: [#14](https://github.com/projectbluefin/bluefin-report/issues/14).
+
+Status: **Kept** = shipped, possibly reshaped. **Follow-up** = belongs to the current design, needs its own issue. **Deferred** = roadmap, revisit when the stated condition holds. **Rejected** = out of scope for this product.
+
+| Prompt capability | Status | Where it stands |
+| :--- | :--- | :--- |
+| Static facts (OS, kernel, arch, image, CPU, GPU) | Kept | Overview "This System" group. The prompt's hostname, machine/boot ID and SMBIOS serials are not shown and are dropped from the attachment (§6). |
+| Per-fact Copy button, export | Follow-up | Metric values copy and the reviewed report exports (Journey C); copy on Overview fact rows is not built. |
+| Raw metric browsing | Kept | Metrics page, both scopes, user rows prefixed `user:`. |
+| `describe` metadata in tooltips | Follow-up | `snapshot.Describe` parses it; no UI caller yet. Tooltips show only name and value. |
+| System/user scope toggle | Deferred | Both scopes are always collected (§5). A Metrics-page scope filter is a refinement, not a requirement. |
+| Dot-boundary match filtering | Deferred | `snapshot.Take` forwards matches; the UI filters by case-insensitive substring over rendered rows, which also finds values. |
+| Inspect and save the compiled JSON report | Kept | Review "Attachment" tab shows the scrubbed `generate` object; Export Report… saves it (§4, §6). |
+| Provider discovery (`list-sources`) | Kept | Collected for both scopes; unreachable sources surface on Overview. |
+| Source management / inspection view | Rejected | §4: "Sources is not a page"; source choices live in Review. |
+| Live telemetry, pressure-stall (PSI) bars, sparklines, cgroup trends | Rejected | §1 non-goal: snapshots only; a monitoring app is a different product. |
+| Signed reports (software key, TPM2 quote, confidential-computing CPU quote) | Deferred | §2: a plain-key signature proves nothing to GitHub readers. Revisit with TPM signing. |
+| HTTPS/mTLS upload profiles (`--url`, `--cert`, `--key`, `--trust`) | Deferred | §1 non-goal for end users (fleet use, needs client certs). Possible later. |
+| `report.files` manager with Polkit | Rejected | §1: no root, no polkit policy. `io.systemd.Files.*` stays opt-in per entry (§6). |
+| Periodic reporting `.timer` control | Rejected | Enabling a system timer needs privilege (§1: no root) and serves fleets, not a user filing one bug. |
+| Companion tools: `systemd-analyze security`/`plot`/`blame`, `systemd-pcrlock`/`systemd-measure`, `systemd-cgtop`, `varlinkctl` | Rejected | Inspector features, not reporting. A single read-only diagnostic may still be proposed, in its own issue, as one more opt-in report extra (existing ones: boot errors, crashes, GNOME extensions, Flatpaks; see `internal/extras`). |
+| Four-view `AdwNavigationSplitView` | Rejected | §4: replaced by the `AdwNavigationView` journey. |

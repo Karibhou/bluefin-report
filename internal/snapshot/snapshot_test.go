@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -322,5 +323,44 @@ func TestTakeCancelledReturnsErrorNotPartialSnapshot(t *testing.T) {
 	}
 	if _, err := Take(ctx, killed, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// Run must keep a runaway systemd-report from exhausting memory: stdout stops at
+// 8 MiB with an error naming the truncation, stderr stops at 1 MiB, and output that
+// exactly fills the cap is not reported as truncated.
+func TestRunCapsOutput(t *testing.T) {
+	const outMax, errMax = 8 << 20, 1 << 20
+	for _, tc := range []struct {
+		name               string
+		outBytes, errBytes int
+		wantOut, wantErr   int
+		truncated          bool
+	}{
+		{name: "within cap", outBytes: 1024, errBytes: 512, wantOut: 1024, wantErr: 512},
+		{name: "exactly at cap", outBytes: outMax, errBytes: errMax, wantOut: outMax, wantErr: errMax},
+		{name: "over cap", outBytes: outMax + 4096, errBytes: errMax + 4096, wantOut: outMax, wantErr: errMax, truncated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldBinary := Binary
+			Binary = filepath.Join(t.TempDir(), "systemd-report")
+			t.Cleanup(func() { Binary = oldBinary })
+			script := fmt.Sprintf("#!/bin/sh\nhead -c %d /dev/zero\nhead -c %d /dev/zero >&2\n", tc.outBytes, tc.errBytes)
+			if err := os.WriteFile(Binary, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			out, errb, err := Run(context.Background())
+			if len(out) != tc.wantOut || len(errb) != tc.wantErr {
+				t.Fatalf("got %d stdout / %d stderr bytes, want %d / %d", len(out), len(errb), tc.wantOut, tc.wantErr)
+			}
+			if tc.truncated {
+				if err == nil || !strings.Contains(err.Error(), "exceeded 8 MiB and was truncated") {
+					t.Fatalf("err = %v, want the truncation error", err)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+		})
 	}
 }
