@@ -130,6 +130,7 @@ func TestUpdateResumeArtifactAndComment(t *testing.T) {
 	f, dir := newFake(), t.TempDir()
 	d := draft
 	d.Mode, d.IssueRef, d.ReportID = Update, "#3", "update-report"
+	f.out["api issues"] = "ME\n" // the signed-in account opened the issue
 	f.fail["artifact create"] = true
 	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
 		t.Fatal("expected interrupted artifact upload")
@@ -154,6 +155,22 @@ func TestUpdateResumeArtifactAndComment(t *testing.T) {
 	}
 	if p, err := Pending(dir); err != nil || len(p) != 0 {
 		t.Fatal(p, err)
+	}
+}
+
+func TestUpdateRefusedForOtherReporter(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	f.out["api issues"] = "someone-else\n"
+	d := draft
+	d.Mode, d.IssueRef, d.ReportID = Update, "3", "foreign-update"
+	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil || !strings.Contains(err.Error(), "Confirm Existing Issue") {
+		t.Fatalf("update on another reporter's issue accepted: %v", err)
+	}
+	if f.count("issue") != 0 {
+		t.Fatal("wrote to another reporter's issue", f.calls)
+	}
+	if p, err := Pending(dir); err != nil || len(p) != 0 {
+		t.Fatal("refused update left a draft", p, err)
 	}
 }
 

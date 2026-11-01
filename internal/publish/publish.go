@@ -420,6 +420,15 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	if err != nil {
 		return Result{}, err
 	}
+	if d.Mode == Update { // an update speaks for the original reporter, so only they may post it
+		out, errb, err := gh(ctx, nil, "api", "repos/"+d.Repo+"/issues/"+d.IssueRef, "--jq", ".user.login")
+		if err != nil {
+			return Result{}, fmt.Errorf("could not read who opened issue #%s: %w: %s", d.IssueRef, err, strings.TrimSpace(string(errb)))
+		}
+		if author := strings.TrimSpace(string(out)); !strings.EqualFold(author, account) {
+			return Result{}, fmt.Errorf("issue #%s was opened by %s, but %s is signed in. Only the original reporter can add an update; use Confirm Existing Issue instead", d.IssueRef, author, account)
+		}
+	}
 	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
 	if err != nil {
 		return Result{}, err

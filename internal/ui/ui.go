@@ -1471,6 +1471,8 @@ func fakeGH(_ context.Context, stdin []byte, args ...string) ([]byte, []byte, er
 	switch {
 	case len(args) > 1 && args[0] == "api" && args[1] == "user":
 		return []byte("dry-run-user\n"), nil, nil
+	case len(args) > 1 && args[0] == "api" && strings.HasPrefix(args[1], "repos/"):
+		return []byte("dry-run-user\n"), nil, nil // Update: the signed-in user opened the issue
 	case len(args) > 1 && args[0] == "api" && args[1] == "--method":
 		return []byte("https://github.com/projectbluefin/dry-run/issues/1 kind/bug\n"), nil, nil
 	case len(args) > 1 && args[0] == "issue":
@@ -1487,18 +1489,14 @@ func fakeGHStream(_ context.Context, _ []byte, onLine func(string), args ...stri
 	return nil
 }
 
-// askGoose hands the problem to ChairLift's Ask Bluefin flow. ChairLift owns Goose readiness and setup;
-// the copied prompt names only the image and failed units, while Goose's read-only tools inspect live logs.
+// askGoose hands the problem to ChairLift's Ask Bluefin flow. ChairLift owns Goose readiness and setup.
+// Unit names can embed the username or hostname, so the copied prompt carries only image and counts;
+// Goose's read-only tools inspect the live services and logs themselves.
 func (u *ui) askGoose() {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Help troubleshoot this Bluefin problem from Report a Problem.\nImage: %s %s (%s)\n", u.sum.Name, u.sum.ImageVersion, u.sum.ImageID)
-	for _, f := range u.sum.FailedUnits {
-		fmt.Fprintf(&b, "Failed unit: %s\n", f)
-	}
-	if n := len(u.sum.Warnings); n > 0 {
-		fmt.Fprintf(&b, "Report warnings: %d\n", n)
-	}
-	b.WriteString("Inspect the current logs and services with your read-only tools, then suggest the next step.")
+	fmt.Fprintf(&b, "Failed units: %d. Report warnings: %d.\n", len(u.sum.FailedUnits), len(u.sum.Warnings))
+	b.WriteString("List the failed units, inspect their logs and status with your read-only tools, then suggest the next step.")
 	u.win.GetClipboard().SetText(b.String())
 	if u.dryRun {
 		log.Print("dry-run: chairlift --ask-bluefin")
@@ -1506,13 +1504,20 @@ func (u *ui) askGoose() {
 		return
 	}
 	go func() {
-		err := exec.Command("chairlift", "--ask-bluefin").Start()
+		cmd := exec.Command("chairlift", "--ask-bluefin")
+		err := cmd.Start()
+		if err == nil {
+			go cmd.Wait() // reap it; ChairLift reports its own failures
+		}
 		post(func() {
-			if err != nil {
-				u.showError("Couldn't Open Troubleshooting", "Control Center is required for Goose troubleshooting: "+err.Error())
-				return
+			switch {
+			case errors.Is(err, exec.ErrNotFound):
+				u.showError("Couldn't Open Troubleshooting", "Goose troubleshooting needs Control Center (chairlift), which isn't installed")
+			case err != nil:
+				u.showError("Couldn't Open Troubleshooting", err.Error())
+			default:
+				u.toast("Troubleshooting prompt copied. Paste it into Goose")
 			}
-			u.toast("Troubleshooting prompt copied. Paste it into Goose")
 		})
 	}()
 }
