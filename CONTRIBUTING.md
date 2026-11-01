@@ -17,5 +17,8 @@ make lint test validate-data
 ./build/bluefin-report --dry-run   # full flow; gh calls are logged, not run
 ```
 
-Releases: push a `v*` tag; GoReleaser publishes the tarballs and `checksums.txt`,
+Releases are cut deliberately, not per commit, as calendar versions `YY.MM.N`
+(N starts at 1 each month; see `scripts/next-version.sh`). On an up-to-date, clean
+`main`, `make bump` runs lint and tests and creates the annotated tag; push it with the
+printed `git push origin YY.MM.N`. GoReleaser publishes the tarballs and `checksums.txt`,
 and the [Homebrew tap](https://github.com/projectbluefin/homebrew-tap) cask picks them up.
