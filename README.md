@@ -7,7 +7,7 @@ login as an issue in the right Bluefin repository, with the full report attached
 
 ## Requirements
 
-- systemd 262 (`systemd-report`)
+- systemd 261 or newer with `systemd-report` (Dakota ships 262, Utah 261)
 - GTK 4 and libadwaita 1 (≥ 1.6) shared libraries from your OS
 - [`gh`](https://cli.github.com/) — sign-in happens inside the app
 
@@ -38,14 +38,26 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
   page lists every removal with a count.
 - Never sent unless you opt in per entry: file contents (`io.systemd.Files.*`)
   and user-session metrics.
+- Diagnostics, each off by default and not even collected unless switched on in Compose:
+  errors from this boot (`journalctl -b0 -p err`, last 40 lines), crashes in the last
+  7 days (`coredumpctl list`), enabled GNOME extensions, installed Flatpak apps. They are
+  scrubbed like the report and attached under `extras`; errors and crashes also appear
+  collapsed in the issue text.
+- Always shown: image ref, tag and manifest digest, CPU model, GPUs (PCI IDs and driver),
+  GNOME Shell version.
 - Sent byte-for-byte as shown in Review; editing anything withdraws consent.
+  An unfinished report can be retried under the same ID only with its unchanged
+  reviewed draft (including its report, area, and screenshots). Resume from Drafts
+  publishes that unchanged saved version; start a new report to publish edits instead.
+  Unreadable or corrupt saved state is not overwritten.
 - The full report is attached publicly to the issue as `systemd-report.json`
   (an issue artifact): anyone who can see the issue can read it. Only if GitHub
   refuses artifacts does it fall back to a secret gist linked in an issue comment.
-- Screenshots (png, jpg, jpeg, webp, gif, mp4, webm; up to 10, 10 MiB each) are
-  uploaded unchanged and public: they are not scrubbed. They go in one issue comment
-  (Confirm: on the one "Same problem here." comment, which also names your report, attached
-  to that issue as `systemd-report-<reportID>.json`) and are copied into the draft until published.
+- Screenshots (png, jpg, jpeg, gif; up to 10, 10 MiB each) are re-encoded to strip
+  metadata, but their visible content is not scrubbed and is public. They go in one
+  issue comment (Confirm: on the one "Same problem here." comment, which also names
+  your report, attached to that issue as `systemd-report-<reportID>.json`) and are
+  copied into the draft until published.
 - Raw snapshots stay in memory. Drafts keep only the reviewed payload under
   `$XDG_STATE_HOME/bluefin-report/drafts/` (mode 0700/0600). Discarding a
   draft never deletes anything already on GitHub.
