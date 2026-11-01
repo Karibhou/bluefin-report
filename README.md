@@ -25,6 +25,10 @@ bluefin-report --dry-run         # full flow, but gh calls are logged, not run
 bluefin-report --print-summary   # collect a snapshot and print the overview, no UI
 ```
 
+Browse All Metrics filters the collected snapshot as you type. Each row has a
+Copy button for its complete value, including text shortened on screen. An empty
+search result explains how to recover; an empty collection is shown separately.
+
 ## Privacy
 
 - Removed before you ever see it: hostname, machine ID, boot ID, machine-info,

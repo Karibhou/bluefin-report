@@ -224,6 +224,10 @@ func (u *ui) activate() {
 		u.win.AddAction(a)
 		return a
 	}
+	idAction("copy-metric", func(value string) {
+		u.win.GetClipboard().SetText(value)
+		u.toast("Metric value copied")
+	})
 	idAction("draft-resume", u.resume)
 	u.discardAct = idAction("draft-discard", func(id string) {
 		if u.publishing {
@@ -496,9 +500,13 @@ func (u *ui) buildMetrics() {
 
 	f := gtk.NewSignalListItemFactory()
 	f.ConnectSetup(hold(func(_ gtk.SignalListItemFactory, p uintptr) {
-		box := gtk.NewBox(gtk.OrientationVerticalValue, 2)
-		box.SetMarginStart(12)
-		box.SetMarginEnd(12)
+		row := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+		row.SetMarginStart(12)
+		row.SetMarginEnd(12)
+		row.SetMarginTop(6)
+		row.SetMarginBottom(6)
+		box := gtk.NewBox(gtk.OrientationVerticalValue, 6)
+		box.SetHexpand(true)
 		for _, mode := range []pango.EllipsizeMode{pango.EllipsizeMiddleValue, pango.EllipsizeEndValue} { // name, value
 			l := gtk.NewLabel("")
 			l.SetXalign(0)
@@ -510,16 +518,25 @@ func (u *ui) buildMetrics() {
 			}
 			box.Append(&l.Widget)
 		}
-		gtk.ListItemNewFromInternalPtr(p).SetChild(&box.Widget)
+		row.Append(&box.Widget)
+		copy := gtk.NewButtonFromIconName("edit-copy-symbolic")
+		copy.SetTooltipText("Copy metric value")
+		copy.SetValign(gtk.AlignCenterValue)
+		copy.AddCssClass("flat")
+		copy.SetActionName("win.copy-metric")
+		row.Append(&copy.Widget)
+		gtk.ListItemNewFromInternalPtr(p).SetChild(&row.Widget)
 	}))
 	f.ConnectBind(hold(func(_ gtk.SignalListItemFactory, p uintptr) {
 		li := gtk.ListItemNewFromInternalPtr(p)
 		s := gtk.StringObjectNewFromInternalPtr(li.GetItem().GoPointer()).GetString()
 		name, val, _ := strings.Cut(s, "\n")
-		box := li.GetChild()
+		row := li.GetChild()
+		box := row.GetFirstChild()
 		gtk.LabelNewFromInternalPtr(box.GetFirstChild().GoPointer()).SetText(name)
 		gtk.LabelNewFromInternalPtr(box.GetLastChild().GoPointer()).SetText(val)
 		box.SetTooltipText(name + " = " + val)
+		gtk.ButtonNewFromInternalPtr(row.GetLastChild().GoPointer()).SetActionTargetValue(glib.NewVariantString(val))
 	}))
 	lv := gtk.NewListView(gtk.NewNoSelection(model), &f.ListItemFactory)
 	lv.AddCssClass("navigation-sidebar")
@@ -527,10 +544,35 @@ func (u *ui) buildMetrics() {
 	sw.SetChild(&lv.Widget)
 	sw.SetVexpand(true)
 
+	empty := adw.NewStatusPage()
+	empty.SetIconName("edit-find-symbolic")
+	results := gtk.NewStack()
+	results.AddNamed(&sw.Widget, "results")
+	results.AddNamed(&empty.Widget, "empty")
+	results.SetVexpand(true)
+	updateResults := func() {
+		if model.GetNItems() > 0 {
+			results.SetVisibleChildName("results")
+			return
+		}
+		if u.search.GetText() != "" {
+			empty.SetTitle("No Results Found")
+			empty.SetDescription("Try a different search or clear the filter.")
+		} else {
+			empty.SetTitle("No Metrics Available")
+			empty.SetDescription("Refresh the snapshot and check the Overview for collection warnings.")
+		}
+		results.SetVisibleChildName("empty")
+	}
+	model.ConnectNotify(hold(func(gobject.Object, uintptr) { updateResults() }))
+
 	search := gtk.NewSearchEntry()
 	u.search = search
 	search.SetPlaceholderText("Filter metrics")
-	search.ConnectSearchChanged(hold(func(gtk.SearchEntry) { u.filter.SetSearch(search.GetText()) }))
+	search.ConnectSearchChanged(hold(func(gtk.SearchEntry) {
+		u.filter.SetSearch(search.GetText())
+		updateResults()
+	}))
 	search.SetMarginTop(6)
 	search.SetMarginBottom(6)
 	search.SetMarginStart(12)
@@ -538,7 +580,8 @@ func (u *ui) buildMetrics() {
 
 	box := gtk.NewBox(gtk.OrientationVerticalValue, 0)
 	box.Append(&search.Widget)
-	box.Append(&sw.Widget)
+	box.Append(&results.Widget)
+	updateResults()
 	u.nav.Add(u.page("Metrics", "metrics", nil, &box.Widget))
 }
 
