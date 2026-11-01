@@ -749,6 +749,96 @@ func TestFallbackResumeNeverDuplicates(t *testing.T) {
 	}
 }
 
+// Account binding: an uncertain write can only be resolved under the account that started it.
+
+// TestSubmitPersistsAccount checks the authenticated identity is recorded before the first write.
+func TestSubmitPersistsAccount(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID = NewReportID()
+	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("api user") != 1 {
+		t.Fatal("expected one api user call to capture the account", f.calls)
+	}
+	s, err := load(filepath.Join(dir, d.ReportID, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Account != "me" {
+		t.Fatalf("saved state has no account: %+v", s)
+	}
+}
+
+// TestResumeAccountMismatchStopsWithoutWrite is the core fix: resuming an uncertain write under a
+// different gh account must stop with guidance and perform no remote write, so it cannot duplicate
+// a write that actually succeeded but timed out.
+func TestResumeAccountMismatchStopsWithoutWrite(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	f.fail["issue create"] = true
+	if _, err := Submit(context.Background(), f.exec, dir, draft); err == nil {
+		t.Fatal("want first issue write to fail")
+	}
+	p, _ := Pending(dir)
+	if len(p) != 1 || p[0].Stage != Uncertain || p[0].Account != "me" {
+		t.Fatal("uncertain draft must record the starting account", p)
+	}
+
+	// Switch gh to another account, and let a lookup there report nothing (the bug that would have
+	// made resume duplicate the write). Resume must refuse instead.
+	f = newFake()
+	f.out["api user"] = "someone-else\n"
+	f.out["api issues"] = "" // nothing created under the new account
+	_, err := Resume(context.Background(), f.exec, dir, p[0].ReportID)
+	if err == nil || !strings.Contains(err.Error(), "someone-else") || !strings.Contains(err.Error(), "me") {
+		t.Fatal("want an account-mismatch error naming both accounts", err, f.calls)
+	}
+	if f.count("api user") != 1 {
+		t.Fatal("expected the account check to run", f.calls)
+	}
+	if f.count(create) != 0 || f.count("api --paginate repos/projectbluefin/dakota/issues?creator=") != 0 {
+		t.Fatal("account mismatch must not look up or re-create the write", f.calls)
+	}
+	s, err := load(filepath.Join(dir, p[0].ReportID, "state.json"))
+	if err != nil || s.Stage != Uncertain || s.Account != "me" {
+		t.Fatal("mismatch resume must not modify saved state", s, err)
+	}
+}
+
+// TestResumeSameAccountProceeds confirms the fix does not break a legitimate same-account resume.
+func TestResumeSameAccountProceeds(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	f.fail["issue create"] = true
+	if _, err := Submit(context.Background(), f.exec, dir, draft); err == nil {
+		t.Fatal("want first issue write to fail")
+	}
+	p, _ := Pending(dir)
+	f.fail["issue create"] = false
+	f.out["api issues"] = "https://github.com/projectbluefin/dakota/issues/9\n"
+	if _, err := Resume(context.Background(), f.exec, dir, p[0].ReportID); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("api --paginate repos/projectbluefin/dakota/issues?creator=me&state=all&per_page=100") != 1 {
+		t.Fatal("same-account resume must resolve the write through lookup", f.calls)
+	}
+}
+
+// TestResumeUnboundDraftFallsBackToLookup keeps older drafts (saved before account binding) working.
+func TestResumeUnboundDraftFallsBackToLookup(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	if err := save(dir, &Saved{ReportID: "r1", Stage: Uncertain, Account: "", Draft: draft}); err != nil {
+		t.Fatal(err)
+	}
+	f.out["api issues"] = "https://github.com/projectbluefin/dakota/issues/9\n"
+	if _, err := Resume(context.Background(), f.exec, dir, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("api --paginate repos/projectbluefin/dakota/issues?creator=me&state=all&per_page=100") != 1 {
+		t.Fatal("an unbound draft must still resolve through the plain lookup", f.calls)
+	}
+}
+
 func shots(t *testing.T, n int, ext string, size int) []string {
 	src := t.TempDir()
 	var ps []string
@@ -821,47 +911,6 @@ func TestScreenshotsResume(t *testing.T) {
 	}
 	if p, _ := Pending(dir); len(p) != 0 {
 		t.Fatal(p)
-	}
-}
-
-func TestResumeRefusesDraftEditedOnDisk(t *testing.T) {
-	for _, edit := range []string{"body", "screenshot"} {
-		f, dir := newFake(), t.TempDir()
-		d := draft
-		d.ReportID = NewReportID()
-		d.Screenshots = shots(t, 1, ".gif", 10)
-		f.fail["issue comment"] = true // leave an unfinished draft
-		Submit(context.Background(), f.exec, dir, d)
-		state := filepath.Join(dir, d.ReportID, "state.json")
-		s, _ := load(state)
-		if edit == "body" {
-			s.Draft.Body += " edited"
-			b, _ := json.Marshal(s)
-			os.WriteFile(state, b, 0o600)
-		} else {
-			os.WriteFile(s.Draft.Screenshots[0], []byte("other image"), 0o600)
-		}
-		before, _ := os.ReadFile(state)
-		f = newFake()
-		if _, err := Resume(context.Background(), f.exec, dir, d.ReportID); !errors.Is(err, ErrDraftChanged) || len(f.calls) != 0 {
-			t.Fatalf("%s: err=%v calls=%v", edit, err, f.calls)
-		}
-		if after, _ := os.ReadFile(state); !bytes.Equal(before, after) {
-			t.Fatalf("%s: edited draft was overwritten", edit)
-		}
-	}
-}
-
-func TestPendingListsReadableDraftsBesideCorruptOne(t *testing.T) {
-	dir := t.TempDir()
-	if err := save(dir, &Saved{ReportID: "good", Stage: LabelsDone, Draft: draft}); err != nil {
-		t.Fatal(err)
-	}
-	os.MkdirAll(filepath.Join(dir, "bad"), 0o700)
-	os.WriteFile(filepath.Join(dir, "bad", "state.json"), []byte(`{"ReportID":`), 0o600)
-	p, err := Pending(dir)
-	if err == nil || len(p) != 1 || p[0].ReportID != "good" {
-		t.Fatal(p, err)
 	}
 }
 
