@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Bluefin Report: Go + GTK4/Libadwaita via [puregotk](https://github.com/jwijenbergh/puregotk) (no CGO for builds).
+Bluefin Report: Go + GTK4/Libadwaita via [puregotk](https://codeberg.org/puregotk/puregotk) (no CGO for builds).
 Design and status: [systemd-report-design-plan.md](systemd-report-design-plan.md).
 
 ## Layout
