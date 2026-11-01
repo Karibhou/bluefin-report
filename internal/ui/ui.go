@@ -915,10 +915,15 @@ func (u *ui) openReview() {
 		return
 	}
 	u.reviewBtn.SetSensitive(false)
+	gen := u.gen
 	go func() {
 		vals := extras.Collect(context.Background(), keys)
 		post(func() {
 			u.syncReview()
+			// A refresh during collection cleared or replaced the snapshot these belong to.
+			if gen != u.gen || u.snap == nil {
+				return
+			}
 			u.showReview(vals)
 		})
 	}()
