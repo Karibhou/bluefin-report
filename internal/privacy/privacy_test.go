@@ -202,6 +202,30 @@ func TestBuildScrubsMachineAndBootIDWithoutSystemReport(t *testing.T) {
 	}
 }
 
+// /etc/machine-id holds "uninitialized" on first boot; that word is not an ID and
+// must not be rewritten wherever it appears in a message.
+func TestBuildIgnoresUninitializedMachineID(t *testing.T) {
+	original := localIDs
+	t.Cleanup(func() { localIDs = original })
+	machineID := filepath.Join(t.TempDir(), "machine-id")
+	if err := os.WriteFile(machineID, []byte("uninitialized\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localIDs = []struct{ name, rule, path string }{
+		{"io.systemd.Basic.MachineID", "machine ID", machineID},
+	}
+	s := snapshot.Snapshot{User: snapshot.Report{Metrics: []snapshot.Metric{
+		{Name: "io.systemd.Journal.HighPriorityMessage", Object: "app", Value: json.RawMessage(`{"MESSAGE": "device uninitialized"}`)},
+	}}}
+	p, err := Build(s, Options{IncludeUser: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(p.JSON), "device uninitialized") || p.Removed["machine ID"] != 0 {
+		t.Errorf("Removed = %v, payload:\n%s", p.Removed, p.JSON)
+	}
+}
+
 func TestBuildRedactsCompressedIPv6AndKeepsDiagnostics(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

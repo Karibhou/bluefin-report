@@ -90,6 +90,10 @@ var localIDs = []struct{ name, rule, path string }{
 	{"io.systemd.Basic.BootID", "boot ID", "/proc/sys/kernel/random/boot_id"},
 }
 
+// idShape accepts the 32-hex journal form and the kernel's dashed UUID form; anything
+// else (e.g. the "uninitialized" first-boot marker in /etc/machine-id) is not an ID.
+var idShape = regexp.MustCompile(`^[0-9a-f]{32}$|^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
+
 // Build produces the reviewed payload from a snapshot. It refuses to return a
 // payload unless a hostname identity can be resolved locally or from a report.
 func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
@@ -141,6 +145,9 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 		for _, v := range values {
 			// The kernel prints the boot ID as a dashed UUID; the journal writes 32 hex digits.
 			v = strings.TrimSpace(v)
+			if !idShape.MatchString(v) {
+				continue
+			}
 			for _, form := range []string{v, strings.ReplaceAll(v, "-", "")} {
 				if !slices.Contains(seen, form) {
 					seen = append(seen, form)
