@@ -72,7 +72,7 @@ search result explains how to recover; an empty collection is shown separately.
 ```bash
 make test           # go test -race ./...
 make run            # build and run with --dry-run
-make lint           # gofmt + go vet
+make lint           # gofmt + go vet + go mod tidy -diff
 make validate-data  # desktop-file-validate (+ appstreamcli if present)
 make bump           # tag the next release, YY.MM.N (does not push)
 ```
