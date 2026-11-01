@@ -35,13 +35,18 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 - Never sent unless you opt in per entry: file contents (`io.systemd.Files.*`)
   and user-session metrics.
 - Sent byte-for-byte as shown in Review; editing anything withdraws consent.
+  An unfinished report can be retried under the same ID only with its unchanged
+  reviewed draft (including its report, area, and screenshots). Resume from Drafts
+  publishes that unchanged saved version; start a new report to publish edits instead.
+  Unreadable or corrupt saved state is not overwritten.
 - The full report is attached publicly to the issue as `systemd-report.json`
   (an issue artifact): anyone who can see the issue can read it. Only if GitHub
   refuses artifacts does it fall back to a secret gist linked in an issue comment.
-- Screenshots (png, jpg, jpeg, webp, gif, mp4, webm; up to 10, 10 MiB each) are
-  uploaded unchanged and public: they are not scrubbed. They go in one issue comment
-  (Confirm: on the one "Same problem here." comment, which also names your report, attached
-  to that issue as `systemd-report-<reportID>.json`) and are copied into the draft until published.
+- Screenshots (png, jpg, jpeg, gif; up to 10, 10 MiB each) are re-encoded to strip
+  metadata, but their visible content is not scrubbed and is public. They go in one
+  issue comment (Confirm: on the one "Same problem here." comment, which also names
+  your report, attached to that issue as `systemd-report-<reportID>.json`) and are
+  copied into the draft until published.
 - Raw snapshots stay in memory. Drafts keep only the reviewed payload under
   `$XDG_STATE_HOME/bluefin-report/drafts/` (mode 0700/0600). Discarding a
   draft never deletes anything already on GitHub.
