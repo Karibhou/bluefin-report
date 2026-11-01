@@ -58,14 +58,17 @@ type Stage string
 
 const (
 	Reviewed     Stage = "Reviewed"
-	GistPending  Stage = "GistPending"
-	GistCreated  Stage = "GistCreated"
 	IssuePending Stage = "IssuePending"
 	IssueCreated Stage = "IssueCreated" // issue exists; kind/area labels not yet ensured
-	LabelsDone   Stage = "LabelsDone"   // labels ensured; gist artifact not yet attached
+	LabelsDone   Stage = "LabelsDone"   // labels ensured; report not yet attached
+	GistPending  Stage = "GistPending"  // artifacts refused: fallback secret gist not yet created
+	GistCreated  Stage = "GistCreated"  // fallback gist exists; its link comment not yet posted
 	Published    Stage = "Published"
 	Uncertain    Stage = "Uncertain"
 )
+
+// artifactName names the issue artifact holding the full report.
+const artifactName = "systemd-report.json"
 
 // Saved is the on-disk state of one draft.
 type Saved struct {
@@ -228,7 +231,8 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
 		return Result{}, ErrNotSignedIn
 	}
-	if s.Stage == Uncertain || s.Stage == GistPending || s.Stage == IssuePending {
+	// Interrupted writes, and drafts from older versions that hold no issue yet, are resolved by lookup.
+	if s.Stage == Uncertain || s.Stage == GistPending || s.Stage != Reviewed && s.IssueURL == "" {
 		if err := lookup(ctx, gh, s); err != nil {
 			return Result{}, err
 		}
@@ -273,19 +277,19 @@ func lookup(ctx context.Context, gh Exec, s *Saved) error {
 		}
 		return strings.TrimSpace(strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]), nil
 	}
-	s.Stage = Reviewed
-	if s.Draft.Attachment != nil && s.GistURL == "" {
+	if s.IssueURL != "" { // the issue exists; only the fallback gist is in doubt
 		url, err := find("gists?per_page=100"+since,
 			fmt.Sprintf(`.[] | select(.description == "bluefin-report %s") | .html_url`, s.ReportID))
 		if err != nil {
 			return err
 		}
+		s.GistURL, s.Stage = url, GistCreated
 		if url == "" {
-			return nil
+			s.Stage = GistPending
 		}
-		s.GistURL = url
+		return nil
 	}
-	s.Stage = GistCreated
+	s.Stage = Reviewed
 	marker := fmt.Sprintf(`.[] | select(.body // "" | contains("bluefin-report-id: %s")) | .html_url`, s.ReportID)
 	var path string
 	if s.Draft.Mode == Confirm {
@@ -330,25 +334,11 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		s.Stage = done
 		return lines[len(lines)-1], nil
 	}
-	if s.Stage == Reviewed {
-		if d.Attachment != nil {
-			url, err := step(GistPending, GistCreated, d.Attachment, "gist", "create",
-				"--desc", "bluefin-report "+s.ReportID, "--filename", "systemd-report.json", "-")
-			if err != nil {
-				return Result{}, err
-			}
-			s.GistURL = url
-		}
-		s.Stage = GistCreated
-		if err := save(dir, s); err != nil {
-			return Result{}, err
-		}
-	}
 	fresh, labeled := false, false // labels known only when the issue was created in this run
-	if s.Stage == GistCreated {
+	if s.Stage == Reviewed {
 		body := d.Body
-		if s.GistURL != "" {
-			body += "\n\nReport data: " + s.GistURL
+		if d.Attachment != nil {
+			body += "\n\nFull report: `" + artifactName + "`, attached to this issue (or linked in a comment below)"
 		}
 		body += "\n\n<!-- bluefin-report-id: " + s.ReportID + " -->"
 		if d.Queue != "" {
@@ -419,21 +409,61 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 		}
 	}
 	if s.Stage == LabelsDone {
-		// The artifact is a convenience: the body already links the gist. When GitHub or an older gh
-		// refuses artifacts outright (no permission, preview unavailable), finish without it;
-		// only transient failures leave the draft pending for Resume.
-		exists, skip := false, false
-		if s.GistURL != "" && !fresh {
-			out, errb, err := gh(ctx, nil, "issue", "artifact", "list", n, "-R", d.Repo, "--json", "body", "--jq", ".[].body")
+		// The full report goes on the issue as a fenced-JSON artifact. Only when GitHub or an older gh
+		// refuses artifacts outright (no permission, preview unavailable) does it fall back to a secret
+		// gist linked in a comment; transient failures leave the draft pending for Resume.
+		exists, refused := false, false
+		if d.Attachment != nil && !fresh {
+			out, errb, err := gh(ctx, nil, "issue", "artifact", "list", n, "-R", d.Repo, "--json", "name", "--jq", ".[].name")
 			if err != nil && !artifactsRefused(errb) {
 				return warn("reading artifacts", err, errb)
 			}
-			skip = err != nil
-			exists = slices.Contains(strings.Fields(string(out)), s.GistURL)
+			refused = err != nil
+			exists = slices.Contains(strings.Split(strings.TrimSpace(string(out)), "\n"), artifactName)
 		}
-		if s.GistURL != "" && !exists && !skip {
-			if _, errb, err := gh(ctx, nil, "issue", "artifact", "create", n, s.GistURL, "--name", "systemd-report", "-R", d.Repo); err != nil && !artifactsRefused(errb) {
-				return warn("attaching report data", err, errb)
+		if d.Attachment != nil && !exists && !refused {
+			doc := slices.Concat([]byte("```json\n"), d.Attachment, []byte("\n```\n"))
+			if _, errb, err := gh(ctx, doc, "issue", "artifact", "create", n, "--body-file", "-", "--name", artifactName, "-R", d.Repo); err != nil {
+				if !artifactsRefused(errb) {
+					return warn("attaching the report", err, errb)
+				}
+				refused = true
+			}
+		}
+		s.Stage = Published
+		if refused {
+			s.Stage = GistPending
+		}
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	freshGist := false
+	if s.Stage == GistPending {
+		url, err := step(GistPending, GistCreated, d.Attachment, "gist", "create",
+			"--desc", "bluefin-report "+s.ReportID, "--filename", artifactName, "-")
+		if err != nil {
+			return r, fmt.Errorf("issue filed at %s, but attaching the report failed (retry to finish): %w", s.IssueURL, err)
+		}
+		s.GistURL, r.GistURL, freshGist = url, url, true
+		if err := save(dir, s); err != nil {
+			return r, err
+		}
+	}
+	if s.Stage == GistCreated {
+		marker := "<!-- bluefin-report-id: " + s.ReportID + " -->"
+		posted := false
+		if !freshGist {
+			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
+				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
+			if err != nil {
+				return warn("reading comments", err, errb)
+			}
+			posted = strings.TrimSpace(string(out)) != ""
+		}
+		if !posted {
+			if _, errb, err := gh(ctx, []byte("Full report: "+s.GistURL+"\n"+marker), "issue", "comment", "--repo", d.Repo, "--body-file", "-", "--", n); err != nil {
+				return warn("linking the report", err, errb)
 			}
 		}
 		s.Stage = Published

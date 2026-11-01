@@ -112,17 +112,17 @@ type ui struct {
 	refErr      *gtk.Label
 
 	// review
-	payload      privacy.Payload
-	reportID     string
-	publishing   bool
-	issueText    *gtk.TextBuffer
-	settingText  bool
-	attachText   *gtk.TextBuffer
-	removed      *gtk.ListBox
-	consentIssue *adw.SwitchRow
-	consentLink  *adw.SwitchRow
-	publishBtn   *gtk.Button
-	saveDialog   *gtk.FileDialog
+	payload       privacy.Payload
+	reportID      string
+	publishing    bool
+	issueText     *gtk.TextBuffer
+	settingText   bool
+	attachText    *gtk.TextBuffer
+	removed       *gtk.ListBox
+	consentIssue  *adw.SwitchRow
+	consentReport *adw.SwitchRow
+	publishBtn    *gtk.Button
+	saveDialog    *gtk.FileDialog
 
 	// done
 	donePage *adw.StatusPage
@@ -693,7 +693,7 @@ func (u *ui) buildReview() {
 	u.issueText.ConnectChanged(hold(func(gtk.TextBuffer) {
 		if !u.settingText {
 			u.consentIssue.SetActive(false) // edited text needs fresh consent (§6.4)
-			u.consentLink.SetActive(false)
+			u.consentReport.SetActive(false)
 		}
 	}))
 	u.attachText = gtk.NewTextBuffer(nil)
@@ -719,13 +719,14 @@ func (u *ui) buildReview() {
 	cg := group("Consent")
 	u.consentIssue = adw.NewSwitchRow()
 	u.consentIssue.SetTitle("I understand the issue text will be public")
-	u.consentLink = adw.NewSwitchRow()
-	u.consentLink.SetTitle("I understand anyone with the attachment link can read it")
+	u.consentReport = adw.NewSwitchRow()
+	u.consentReport.SetTitle("I understand the full report will be attached publicly to the issue")
+	u.consentReport.SetSubtitle("Anyone who can see the issue can read it")
 	sync := hold(func(gobject.Object, uintptr) { u.syncPublish() })
 	u.consentIssue.ConnectNotify(sync)
-	u.consentLink.ConnectNotify(sync)
+	u.consentReport.ConnectNotify(sync)
 	cg.Add(&u.consentIssue.Widget)
-	cg.Add(&u.consentLink.Widget)
+	cg.Add(&u.consentReport.Widget)
 
 	u.saveDialog = gtk.NewFileDialog()
 	u.saveDialog.SetTitle("Export Report")
@@ -767,7 +768,7 @@ func (u *ui) syncPublish() {
 	if u.publishBtn == nil {
 		return // notify fires while the page is still being built
 	}
-	ok := !u.publishing && u.consentIssue.GetActive() && (!u.attach.GetActive() || u.consentLink.GetActive())
+	ok := !u.publishing && u.consentIssue.GetActive() && (!u.attach.GetActive() || u.consentReport.GetActive())
 	u.publishBtn.SetSensitive(ok)
 	if u.discardAct != nil {
 		u.discardAct.SetEnabled(!u.publishing) // greys out every Discard button
@@ -827,8 +828,8 @@ func (u *ui) openReview() {
 	}
 
 	u.consentIssue.SetActive(false)
-	u.consentLink.SetActive(false)
-	u.consentLink.SetVisible(u.attach.GetActive())
+	u.consentReport.SetActive(false)
+	u.consentReport.SetVisible(u.attach.GetActive())
 	u.syncPublish()
 	u.nav.PushByTag("review")
 }
@@ -850,9 +851,6 @@ func (u *ui) markdown() string {
 	}
 	for _, f := range u.sum.FailedUnits {
 		fmt.Fprintf(&b, "\n- `%s`", f)
-	}
-	if u.attach.GetActive() {
-		b.WriteString("\n\nFull report attached.\n")
 	}
 	return b.String()
 }
@@ -1120,8 +1118,8 @@ func stateDir() string {
 func fakeGH(_ context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
 	log.Printf("dry-run gh %q (stdin %d bytes)", args, len(stdin))
 	switch {
-	case len(args) > 1 && args[0] == "gist" && args[1] == "create":
-		return []byte("https://gist.github.com/dry-run/0000\n"), nil, nil
+	case len(args) > 1 && args[0] == "api" && args[1] == "--method":
+		return []byte("https://github.com/projectbluefin/dry-run/issues/1 kind/bug\n"), nil, nil
 	case len(args) > 1 && args[0] == "issue":
 		return []byte("https://github.com/projectbluefin/dry-run/issues/1\n"), nil, nil
 	}

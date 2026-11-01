@@ -157,7 +157,7 @@ Principle: **nothing leaves the machine that the user has not seen in its final 
 5. **Freeze the payload.** Publish sends the bytes shown in Review, byte-for-byte; no re-collection or re-formatting after consent.
 6. **Size budgets keep valid JSON.** Attachment ≤ 1 MiB; if over, drop whole metric families (largest first), record them in `"omittedFamilies"`, never cut mid-object. Issue body ≤ 60 KB (GitHub limit is 65,536 chars).
 7. **Storage.** Raw snapshots live in memory only. Drafts store only the reviewed payload, in `$XDG_STATE_HOME/bluefin-report/drafts/<id>/`, mode `0700`/`0600`, written via temp file + rename.
-8. Deleting a local draft never implies deleting anything remote; the UI says so when a gist/issue already exists.
+8. Deleting a local draft never implies deleting anything remote; the UI says so when an issue (or fallback gist) already exists.
 
 Regex redaction is best-effort and the UI says so in one line, not a paragraph.
 
@@ -178,9 +178,10 @@ The repo is shown, not chosen. `publish.Submit` accepts only these two repos and
 Use `gh` (Homebrew) rather than a token store of our own. Beta 1 corrections:
 
 - Sign-in: run `gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key` without a TTY; read the one-time code from stderr, show it in an `AdwAlertDialog` with Copy, and open the URL with `GtkUriLauncher`. (Beta 1 said "8-character code" — it is `XXXX-XXXX`.) Verify exact non-TTY output against the pinned `gh` version before building on it.
-- Attachment: **secret gist** (default `gh gist create`, no `--public`). Anyone with the link can read it, which the consent text states plainly; it is not listed on the user's profile.
+- Attachment: the full scrubbed report is attached to the issue as an **issue artifact** named `systemd-report.json`, a fenced ```` ```json ```` markdown document (`gh issue artifact create N --body-file - --name systemd-report.json -R <repo>`, preview in gh 2.103). It is public to anyone who can see the issue, which the consent text states plainly. The body says `Full report: attached to this issue as systemd-report.json`.
+- Fallback only when artifacts are refused outright (HTTP 401/403/404/410/422, or a gh without the preview command): a **secret gist** (`gh gist create`, no `--public`; not listed on the profile, readable by anyone with the link) linked in one issue comment `Full report: <gist>` carrying the report-id marker. Transient failures stay pending for Resume.
 - Labels: create the issue through REST (`gh api --method POST repos/<repo>/issues`) with `kind/bug`, the optional `area/*` the reporter picked, and issue type `Bug`. REST silently drops labels and type for reporters without push access (GraphQL would fail the whole create), so when the returned labels lack them the app posts one `/kind bug` (and `/area …`) comment, which Prow accepts from anyone. `needs-triage` → `triage/accepted` stays with maintainers. The `<!-- hive-queue: … -->` marker stays in the body.
-- The gist is attached to the issue as a link artifact (`gh issue artifact create N <gist> --name systemd-report`, preview in gh 2.103); the `Report data:` line stays in the body as a fallback.
+- Before attaching on Resume, `gh issue artifact list N --json name` is checked for `systemd-report.json`; before the fallback comment, the issue's comments are checked for the report-id marker.
 - Issue URL comes from the REST response.
 
 ### Publication is not atomic — model it
@@ -192,20 +193,24 @@ stateDiagram-v2
     [*] --> Draft
     Draft --> Reviewed: consent given
     Reviewed --> Draft: payload edited
-    Reviewed --> GistPending
+    Reviewed --> IssuePending
+    IssuePending --> IssueCreated: URL recorded
+    IssuePending --> Uncertain: crash or timeout
+    IssueCreated --> LabelsDone: kind/area ensured
+    LabelsDone --> Published: artifact attached (or none)
+    LabelsDone --> GistPending: artifacts refused
     GistPending --> GistCreated: URL recorded
     GistPending --> Uncertain: crash or timeout
-    GistCreated --> IssuePending
-    IssuePending --> Published: URL recorded
-    IssuePending --> Uncertain: crash or timeout
-    Uncertain --> GistCreated: lookup finds gist, no issue
-    Uncertain --> Published: lookup finds issue
-    Uncertain --> Reviewed: lookup finds nothing
+    GistCreated --> Published: link comment posted
+    Uncertain --> IssueCreated: lookup finds issue
+    Uncertain --> Reviewed: lookup finds no issue
+    Uncertain --> GistCreated: lookup finds fallback gist
+    Uncertain --> GistPending: lookup finds no fallback gist
     Published --> [*]
 ```
 
-- Each draft carries a random `report-id` written into the gist description and an HTML comment in the issue body.
-- **Uncertain** is resolved by lookup, not by retrying: search the user's recent gists and `is:issue author:@me <report-id>` on the target repo. Only if nothing is found does the app return to Reviewed.
+- Each draft carries a random `report-id` written into an HTML comment in the issue body (and, on fallback, the gist description and link comment).
+- **Uncertain** is resolved by lookup, not by retrying, through consistent REST list endpoints rather than lagging search: the user's issues on the target repo by `creator` with the report-id marker, or, once the issue exists, the user's recent gists by description. Only if nothing is found is the write retried. Artifact and comment steps after the issue exists re-check before writing instead.
 - Confirm mode is one step (`gh issue comment`) with the same Uncertain handling.
 
 ## 8. Stack and packaging

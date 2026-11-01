@@ -3,7 +3,7 @@
 A GTK4/Libadwaita app that turns a [`systemd-report`](https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html)
 snapshot into a reviewed, privacy-scrubbed GitHub issue. You see exactly what
 leaves the machine before anything is sent; it is published with your own `gh`
-login as a gist plus an issue in the right Bluefin repository.
+login as an issue in the right Bluefin repository, with the full report attached.
 
 ## Requirements
 
@@ -35,6 +35,9 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 - Never sent unless you opt in per entry: file contents (`io.systemd.Files.*`)
   and user-session metrics.
 - Sent byte-for-byte as shown in Review; editing anything withdraws consent.
+- The full report is attached publicly to the issue as `systemd-report.json`
+  (an issue artifact): anyone who can see the issue can read it. Only if GitHub
+  refuses artifacts does it fall back to a secret gist linked in an issue comment.
 - Raw snapshots stay in memory. Drafts keep only the reviewed payload under
   `$XDG_STATE_HOME/bluefin-report/drafts/` (mode 0700/0600). Discarding a
   draft never deletes anything already on GitHub.
