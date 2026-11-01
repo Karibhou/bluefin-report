@@ -91,13 +91,36 @@ func TestBuildRedactsCompressedIPv6AndKeepsDiagnostics(t *testing.T) {
 		{"unspecified", "::", "[ipv6]", "IPv6 address"},
 		{"bracketed", "[2001:db8::]", "[[ipv6]]", "IPv6 address"},
 		{"bracketed loopback", "[::1]:443", "[[ipv6]]:443", "IPv6 address"},
+		{"full IPv6", "2001:db8:85a3:1:2:8a2e:370:7334", "[ipv6]", "IPv6 address"},
+		{"IPv6 final numeric group", "2001:db8::443", "[ipv6]", "IPv6 address"},
 		{"sentence punctuation", "(2001:db8::).", "([ipv6]).", "IPv6 address"},
 		{"mapped sentence punctuation", "(::ffff:192.0.2.128).", "([ipv4]).", "IPv4 address"},
 		{"leading punctuation", "...::1", "...[ipv6]", "IPv6 address"},
 		{"IPv4", "192.0.2.128", "[ipv4]", "IPv4 address"},
 		{"IPv4 punctuation", ":192.0.2.128.", ":[ipv4].", "IPv4 address"},
+		{"IPv4 port", "192.0.2.128:443", "[ipv4]:443", "IPv4 address"},
+		{"IPv4 peer diagnostic", "peer 192.0.2.128:443 closed", "peer [ipv4]:443 closed", "IPv4 address"},
+		{"IPv4 port punctuation", "peer (192.0.2.128:443). closed", "peer ([ipv4]:443). closed", "IPv4 address"},
+		{"bracketed IPv4 port", "[192.0.2.128]:443", "[[ipv4]]:443", "IPv4 address"},
 		{"version", "7.2.11-ogc4", "7.2.11-ogc4", ""},
 		{"time", "00:37:42", "00:37:42", ""},
+		{"C++ string", "std::string", "std::string", ""},
+		{"Rust panic", "core::panicking", "core::panicking", ""},
+		{"namespace", "foo::bar", "foo::bar", ""},
+		{"GTK type", "Gtk::Widget", "Gtk::Widget", ""},
+		{"backtrace", "std::string\ncore::panicking\nfoo::bar\nGtk::Widget", "std::string\ncore::panicking\nfoo::bar\nGtk::Widget", ""},
+		{"underscore prefix", "_::1", "_::1", ""},
+		{"underscore suffix", "::1_", "::1_", ""},
+		{"Unicode letter prefix", "λ::1", "λ::1", ""},
+		{"Unicode letter suffix", "::1界", "::1界", ""},
+		{"Unicode mark prefix", "e\u0301::1", "e\u0301::1", ""},
+		{"Unicode mark suffix", "::1\u0301", "::1\u0301", ""},
+		{"Unicode number prefix", "١::1", "١::1", ""},
+		{"Unicode number suffix", "::1Ⅷ", "::1Ⅷ", ""},
+		{"Unicode connector prefix", "‿::1", "‿::1", ""},
+		{"Unicode connector suffix", "::1‿", "::1‿", ""},
+		{"Unicode joiner prefix", "\u200d::1", "\u200d::1", ""},
+		{"Unicode joiner suffix", "::1\u200c", "::1\u200c", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := metric("io.systemd.Network.Address", tt.input, tt.input)
@@ -136,6 +159,39 @@ func TestBuildRedactsCompressedIPv6AndKeepsDiagnostics(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildRedactsMixedAddressesAndPreservesBacktrace(t *testing.T) {
+	input := "std::string peer 192.0.2.128:443 closed\ncore::panicking [::1]:8443 ::ffff:192.0.2.128 foo::bar Gtk::Widget"
+	want := "std::string peer [ipv4]:443 closed\ncore::panicking [[ipv6]]:8443 [ipv4] foo::bar Gtk::Widget"
+	m := metric("io.systemd.Journal.Message", input, input)
+	m.Fields = map[string]any{"message": input}
+	p, err := Build(snapshot.Snapshot{System: snapshot.Report{Metrics: []snapshot.Metric{m}}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc document
+	if err := json.Unmarshal(p.JSON, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.System.Metrics) != 1 {
+		t.Fatalf("got %d metrics, want 1", len(doc.System.Metrics))
+	}
+	got := doc.System.Metrics[0]
+	var value string
+	if err := json.Unmarshal(got.Value, &value); err != nil {
+		t.Fatal(err)
+	}
+	if got.Object != want || value != want || got.Fields["message"] != want {
+		t.Errorf("scrubbed object = %q, value = %q, field = %q; want %q",
+			got.Object, value, got.Fields["message"], want)
+	}
+	if strings.Contains(string(p.JSON), "192.0.2.128") || strings.Contains(string(p.JSON), "::1") {
+		t.Error("exported payload still contains an address")
+	}
+	if len(p.Removed) != 2 || p.Removed["IPv4 address"] != 6 || p.Removed["IPv6 address"] != 3 {
+		t.Errorf("Removed = %v, want IPv4 address: 6, IPv6 address: 3", p.Removed)
 	}
 }
 

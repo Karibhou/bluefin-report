@@ -12,6 +12,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/projectbluefin/bluefin-report/internal/snapshot"
 )
@@ -192,34 +194,76 @@ func (r *redactor) text(s string) string {
 	})
 	s = r.replace(reHome, s, "home path", "~")
 	s = r.replace(reMAC, s, "MAC address", "[mac]") // before IPv6: a MAC also parses as hex groups
-	s = reIPish.ReplaceAllStringFunc(s, func(tok string) string {
-		candidate := tok
-		ip := net.ParseIP(candidate)
-		if ip == nil {
-			// Sentence punctuation may surround an address, but colons can be
-			// meaningful IPv6 compression and must survive the first retry.
-			candidate = strings.Trim(tok, ".")
-			ip = net.ParseIP(candidate)
-		}
-		if ip == nil {
-			// Keep recognizing IPv4 and uncompressed IPv6 next to a colon.
-			candidate = strings.Trim(tok, ".:")
-			ip = net.ParseIP(candidate)
-		}
-		if ip == nil {
-			return tok // versions, times, unit names
-		}
-		if ip.To4() != nil {
-			r.removed["IPv4 address"]++
-			return strings.Replace(tok, candidate, "[ipv4]", 1)
-		}
-		r.removed["IPv6 address"]++
-		return strings.Replace(tok, candidate, "[ipv6]", 1)
-	})
+	s = r.addresses(s)
 	for i, re := range r.literals {
 		s = r.replace(re, s, r.names[i], "["+r.names[i]+"]")
 	}
 	return s
+}
+
+func (r *redactor) addresses(s string) string {
+	var out strings.Builder
+	written := 0
+	for offset := 0; offset < len(s); {
+		match := reIPish.FindStringIndex(s[offset:])
+		if match == nil {
+			break
+		}
+		start, end := offset+match[0], offset+match[1]
+		offset = end
+		// A hex-looking fragment inside a word is diagnostic text, not an IP:
+		// std::string, core::panicking, and Unicode identifiers must survive.
+		before, _ := utf8.DecodeLastRuneInString(s[:start])
+		after, _ := utf8.DecodeRuneInString(s[end:])
+		if ipWord(before) || ipWord(after) {
+			continue
+		}
+		tok := s[start:end]
+		candidate := tok
+		ip := net.ParseIP(candidate)
+		if ip == nil {
+			// Keep meaningful IPv6 compression before trying colon punctuation.
+			candidate = strings.Trim(tok, ".")
+			ip = net.ParseIP(candidate)
+		}
+		if ip == nil {
+			candidate = strings.Trim(tok, ".:")
+			ip = net.ParseIP(candidate)
+		}
+		if ip == nil {
+			// Bare IPv4 endpoints need their port split off, not trimmed away.
+			// Unbracketed IPv6 is parsed above as a complete address.
+			if host, _, err := net.SplitHostPort(candidate); err == nil {
+				ip = net.ParseIP(host)
+				if ip != nil && ip.To4() != nil {
+					candidate = host
+				} else {
+					ip = nil
+				}
+			}
+		}
+		if ip == nil {
+			continue // versions, times, unit names
+		}
+		replacement, rule := "[ipv6]", "IPv6 address"
+		if ip.To4() != nil {
+			replacement, rule = "[ipv4]", "IPv4 address"
+		}
+		r.removed[rule]++
+		at := start + strings.Index(tok, candidate)
+		out.WriteString(s[written:at])
+		out.WriteString(replacement)
+		written = at + len(candidate)
+	}
+	if written == 0 {
+		return s
+	}
+	out.WriteString(s[written:])
+	return out.String()
+}
+
+func ipWord(r rune) bool {
+	return unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.Pc) || r == '\u200c' || r == '\u200d'
 }
 
 func (r *redactor) replace(re *regexp.Regexp, s, rule, with string) string {
