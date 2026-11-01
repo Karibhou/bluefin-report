@@ -158,6 +158,7 @@ type ui struct {
 	draftsStack *gtk.Stack // "list" or "empty"
 	discardAct  *gio.SimpleAction
 	discarded   map[uintptr]string // undo toast → report ID: hidden from Drafts, deleted when the toast goes without Undo
+	undoToast   *adw.Toast         // the showing Undo toast; any new toast dismisses it, since normal toasts queue behind it
 	onUndo      *func(adw.Toast)   // connected to every undo toast; one callback for all, keyed by toast pointer
 	onDismissed *func(adw.Toast)
 
@@ -291,7 +292,8 @@ func (u *ui) activate() {
 		u.discarded[t.Ptr] = id
 		log.Printf("ui: draft %s discarded, undo available", id)
 		u.refreshDrafts()
-		u.toasts.AddToast(t)
+		u.addToast(t)
+		u.undoToast = t
 	})
 	stringAction("shot-remove", func(path string) {
 		u.shots = slices.DeleteFunc(u.shots, func(p string) bool { return p == path })
@@ -327,7 +329,16 @@ func (u *ui) showError(heading, body string) {
 	a.Present(&u.win.Widget)
 }
 
-func (u *ui) toast(msg string) { u.toasts.AddToast(adw.NewToast(msg)) }
+func (u *ui) toast(msg string) { u.addToast(adw.NewToast(msg)) }
+
+// addToast shows t at once: a pending Undo toast never times out, so it is dismissed
+// (committing its discard) instead of holding every later toast in the queue.
+func (u *ui) addToast(t *adw.Toast) {
+	if u.undoToast != nil {
+		u.undoToast.Dismiss()
+	}
+	u.toasts.AddToast(t)
+}
 
 // toolbar adds the header, plus the dry-run banner below it, to a page.
 func (u *ui) toolbar(header *adw.HeaderBar, content *gtk.Widget) *adw.ToolbarView {
@@ -1290,6 +1301,9 @@ func (u *ui) buildDrafts() {
 		u.refreshDrafts()
 	})
 	u.onDismissed = hold(func(t adw.Toast) {
+		if u.undoToast != nil && u.undoToast.Ptr == t.Ptr {
+			u.undoToast = nil
+		}
 		id, ok := u.discarded[t.Ptr]
 		if !ok {
 			return
