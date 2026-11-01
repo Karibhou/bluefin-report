@@ -687,7 +687,7 @@ func (u *ui) buildCompose() {
 		}
 		for i := range files.GetNItems() {
 			o := files.GetObject(i)
-			if p := (&gio.FileBase{Ptr: o.Ptr}).GetPath(); p != "" && !slices.Contains(u.shots, p) {
+			if p := (&gio.FileBase{Ptr: o.Ptr}).GetPath(); p != "" && !slices.Contains(u.shots, p) && fileExists(p) {
 				u.shots = append(u.shots, p)
 			}
 			o.Unref()
@@ -977,7 +977,11 @@ func (u *ui) showReview(vals map[string]string) {
 	u.shotsGroup.SetVisible(len(u.shots) > 0)
 	u.consentGroup.SetDescription("")
 	if len(u.shots) > 0 {
-		u.consentGroup.SetDescription(fmt.Sprintf("%d screenshots become public. Metadata is stripped, but image content is not scrubbed.", len(u.shots)))
+		n := "1 screenshot becomes"
+		if len(u.shots) > 1 {
+			n = fmt.Sprintf("%d screenshots become", len(u.shots))
+		}
+		u.consentGroup.SetDescription(n + " public. Metadata is stripped, but image content is not scrubbed.")
 	}
 	u.consentIssue.SetActive(false)
 	u.consentReport.SetActive(false)
@@ -1325,4 +1329,9 @@ func (u *ui) about() {
 	a.SetWebsite("https://github.com/projectbluefin/bluefin-report")
 	a.SetLicenseType(gtk.LicenseApache20Value)
 	a.Present(&u.win.Widget)
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular()
 }

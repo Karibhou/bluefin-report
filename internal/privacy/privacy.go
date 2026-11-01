@@ -38,11 +38,12 @@ type Payload struct {
 }
 
 type document struct {
-	MediaType       string            `json:"mediaType"`
+	MediaType string `json:"mediaType"`
+	// Extras comes first so the size-limited Review preview always shows the opt-in diagnostics.
+	Extras          map[string]string `json:"extras,omitempty"`
 	System          snapshot.Report   `json:"system"`
 	User            *snapshot.Report  `json:"user,omitempty"`
 	OmittedFamilies []string          `json:"omittedFamilies,omitempty"`
-	Extras          map[string]string `json:"extras,omitempty"`
 }
 
 // dropped families identify the machine and have no diagnostic value for a public report.
