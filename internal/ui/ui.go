@@ -25,6 +25,7 @@ import (
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 	"codeberg.org/puregotk/puregotk/v4/pango"
 
+	"github.com/projectbluefin/bluefin-report/internal/extras"
 	"github.com/projectbluefin/bluefin-report/internal/privacy"
 	"github.com/projectbluefin/bluefin-report/internal/publish"
 	"github.com/projectbluefin/bluefin-report/internal/snapshot"
@@ -91,7 +92,8 @@ type ui struct {
 	ovStack    *gtk.Stack
 	spinner    *adw.Spinner
 	statusPage *adw.StatusPage
-	sysRows    [6]*adw.ActionRow
+	sysRows    [12]*adw.ActionRow
+	ident      extras.Identity
 	health     *gtk.ListBox
 
 	// metrics
@@ -109,6 +111,8 @@ type ui struct {
 	title       *adw.EntryRow
 	issueRef    *adw.EntryRow
 	desc        *gtk.TextBuffer
+	steps       *gtk.TextBuffer
+	optIn       []*adw.SwitchRow // parallel to extras.Sections
 	attach      *adw.SwitchRow
 	includeUser *adw.SwitchRow
 	queue       *adw.ComboRow
@@ -359,7 +363,7 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 	header.PackEnd(&mb.Widget)
 
 	sys := group("This system")
-	for i, t := range []string{"Name", "Version", "Image", "Kernel", "Architecture", "State"} {
+	for i, t := range []string{"Name", "Version", "Image", "Kernel", "Architecture", "State", "Image ref", "Tag", "Digest", "CPU", "GPU", "GNOME"} {
 		r := adw.NewActionRow()
 		r.SetTitle(t)
 		r.AddCssClass("property")
@@ -434,6 +438,7 @@ func (u *ui) refresh() {
 		defer cancel()
 		start := time.Now()
 		s, err := snapshot.Take(ctx, snapshot.Run, nil)
+		id := extras.Probe(ctx)
 		post(func() {
 			if gen != u.gen {
 				log.Printf("ui: dropping stale snapshot gen %d", gen)
@@ -442,6 +447,8 @@ func (u *ui) refresh() {
 			u.refreshAct.SetEnabled(true)
 			log.Printf("ui: snapshot gen %d in %s: %d system, %d user metrics, err=%v",
 				gen, time.Since(start).Round(time.Millisecond), len(s.System.Metrics), len(s.User.Metrics), err)
+			log.Printf("ui: identity ref=%q tag=%q digest=%q cpu=%q gpu=%q gnome=%q", id.Ref, id.Tag, id.Digest, id.CPU, id.GPU, id.GNOME)
+			u.ident = id
 			u.loaded(s, err)
 		})
 	}()
@@ -469,7 +476,8 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	} else {
 		u.helpGroup.SetDescription("Reports go to " + u.repoName + ", the repository for the image this system runs.")
 	}
-	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState} {
+	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState,
+		u.ident.Ref, u.ident.Tag, u.ident.Digest, u.ident.CPU, u.ident.GPU, u.ident.GNOME} {
 		if v == "" {
 			v = "Unknown"
 		}
@@ -618,6 +626,18 @@ func (u *ui) buildCompose() {
 	tv.AddCssClass("card")
 	dg.Add(&tv.Widget)
 
+	stepsGroup := group("Steps to reproduce (optional)")
+	u.steps = gtk.NewTextBuffer(nil)
+	stv := gtk.NewTextViewWithBuffer(u.steps)
+	stv.SetWrapMode(gtk.WrapWordCharValue)
+	stv.SetTopMargin(12)
+	stv.SetBottomMargin(12)
+	stv.SetLeftMargin(12)
+	stv.SetRightMargin(12)
+	stv.SetSizeRequest(-1, 120)
+	stv.AddCssClass("card")
+	stepsGroup.Add(&stv.Widget)
+
 	og := group("Options")
 	u.attach = adw.NewSwitchRow()
 	u.attach.SetTitle("Attach system report")
@@ -635,6 +655,15 @@ func (u *ui) buildCompose() {
 	u.area.SetTitle("Area")
 	u.area.SetModel(gtk.NewStringList([]string{"Not sure", "Desktop", "Flatpak apps", "Gaming", "Hardware", "Installer", "Developer tools"}))
 	og.Add(&u.area.Widget)
+
+	xg := group("Include diagnostics")
+	xg.SetDescription("Off by default. Scrubbed like the report and shown in Review before anything is sent")
+	for _, s := range extras.Sections {
+		r := adw.NewSwitchRow()
+		r.SetTitle(s.Title)
+		xg.Add(&r.Widget)
+		u.optIn = append(u.optIn, r)
+	}
 
 	sg := group("Screenshots")
 	sg.SetDescription("Public. Metadata is stripped by re-encoding. PNG, JPEG or GIF; up to 10 files, 10 MiB each")
@@ -658,7 +687,7 @@ func (u *ui) buildCompose() {
 		}
 		for i := range files.GetNItems() {
 			o := files.GetObject(i)
-			if p := (&gio.FileBase{Ptr: o.Ptr}).GetPath(); p != "" && !slices.Contains(u.shots, p) {
+			if p := (&gio.FileBase{Ptr: o.Ptr}).GetPath(); p != "" && !slices.Contains(u.shots, p) && fileExists(p) {
 				u.shots = append(u.shots, p)
 			}
 			o.Unref()
@@ -679,8 +708,8 @@ func (u *ui) buildCompose() {
 	u.reviewBtn.SetHalign(gtk.AlignCenterValue)
 	u.reviewBtn.SetSensitive(false)
 
-	u.newOnly = []*gtk.Widget{&u.title.Widget, &u.queue.Widget, &u.area.Widget}
-	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &og.Widget, &sg.Widget, &u.reviewBtn.Widget))
+	u.newOnly = []*gtk.Widget{&u.title.Widget, &u.queue.Widget, &u.area.Widget, &stepsGroup.Widget}
+	u.composePage = u.page("Report a Problem", "compose", nil, scrolled(&g.Widget, &dg.Widget, &stepsGroup.Widget, &og.Widget, &xg.Widget, &sg.Widget, &u.reviewBtn.Widget))
 	u.nav.Add(u.composePage)
 }
 
@@ -744,6 +773,10 @@ func (u *ui) openCompose(m publish.Mode) {
 	u.title.SetText("")
 	u.issueRef.SetText("")
 	u.desc.SetText("", -1)
+	u.steps.SetText("", -1)
+	for _, r := range u.optIn {
+		r.SetActive(false)
+	}
 	u.shots = nil
 	u.syncShots()
 	if newIssue {
@@ -868,13 +901,36 @@ func bufText(b *gtk.TextBuffer) string {
 	return b.GetText(&s, &e, false)
 }
 
+// openReview collects the opted-in diagnostics off the main thread, then shows Review.
+// With none opted in, nothing is collected.
 func (u *ui) openReview() {
+	var keys []string
+	for i, s := range extras.Sections {
+		if u.optIn[i].GetActive() {
+			keys = append(keys, s.Key)
+		}
+	}
+	if len(keys) == 0 {
+		u.showReview(nil)
+		return
+	}
+	u.reviewBtn.SetSensitive(false)
+	go func() {
+		vals := extras.Collect(context.Background(), keys)
+		post(func() {
+			u.syncReview()
+			u.showReview(vals)
+		})
+	}()
+}
+
+func (u *ui) showReview(vals map[string]string) {
 	name := ""
 	if cur, err := user.Current(); err == nil {
 		name = cur.Username
 	}
 	// Synchronous on purpose: measured ~40 ms (9.5k metrics, 725 KB payload) on a dev host.
-	p, err := privacy.Build(*u.snap, privacy.Options{Username: name, IncludeUser: u.includeUser.GetActive()})
+	p, err := privacy.Build(*u.snap, privacy.Options{Username: name, IncludeUser: u.includeUser.GetActive(), Extras: vals})
 	if err != nil {
 		u.showError("Couldn't prepare the report: " + err.Error())
 		return
@@ -921,7 +977,11 @@ func (u *ui) openReview() {
 	u.shotsGroup.SetVisible(len(u.shots) > 0)
 	u.consentGroup.SetDescription("")
 	if len(u.shots) > 0 {
-		u.consentGroup.SetDescription(fmt.Sprintf("%d screenshots become public. Metadata is stripped, but image content is not scrubbed.", len(u.shots)))
+		n := "1 screenshot becomes"
+		if len(u.shots) > 1 {
+			n = fmt.Sprintf("%d screenshots become", len(u.shots))
+		}
+		u.consentGroup.SetDescription(n + " public. Metadata is stripped, but image content is not scrubbed.")
 	}
 	u.consentIssue.SetActive(false)
 	u.consentReport.SetActive(false)
@@ -938,10 +998,15 @@ func (u *ui) markdown() string {
 	if d := strings.TrimSpace(bufText(u.desc)); d != "" {
 		b.WriteString(d + "\n\n")
 	}
+	if s := strings.TrimSpace(bufText(u.steps)); s != "" && u.mode == publish.NewIssue {
+		b.WriteString("### Steps to reproduce\n\n" + s + "\n\n")
+	}
 	b.WriteString("| | |\n|---|---|\n")
 	for _, kv := range [][2]string{
 		{"System", u.sum.Name}, {"Version", u.sum.ImageVersion}, {"Image", u.sum.ImageID},
 		{"Kernel", u.sum.Kernel}, {"Arch", u.sum.Arch}, {"State", u.sum.SystemState},
+		{"Image ref", u.ident.Ref}, {"Tag", u.ident.Tag}, {"Digest", u.ident.Digest},
+		{"CPU", u.ident.CPU}, {"GPU", u.ident.GPU}, {"GNOME", u.ident.GNOME},
 		{"Failed units", fmt.Sprint(len(u.sum.FailedUnits))},
 	} {
 		fmt.Fprintf(&b, "| %s | %s |\n", kv[0], kv[1])
@@ -949,6 +1014,7 @@ func (u *ui) markdown() string {
 	for _, f := range u.sum.FailedUnits {
 		fmt.Fprintf(&b, "\n- `%s`", f)
 	}
+	b.WriteString(extras.Markdown(u.payload.Extras))
 	return b.String()
 }
 
@@ -1263,4 +1329,9 @@ func (u *ui) about() {
 	a.SetWebsite("https://github.com/projectbluefin/bluefin-report")
 	a.SetLicenseType(gtk.LicenseApache20Value)
 	a.Present(&u.win.Widget)
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular()
 }
