@@ -43,7 +43,7 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 ```bash
 make test           # go test -race ./...
 make run            # build and run with --dry-run
-make lint           # gofmt + go vet
+make lint           # gofmt + go vet + go mod tidy -diff
 make validate-data  # desktop-file-validate (+ appstreamcli if present)
 ```
 
