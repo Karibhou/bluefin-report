@@ -222,13 +222,6 @@ func (r *redactor) addresses(s string) string {
 		}
 		start, end := offset+match[0], offset+match[1]
 		offset = end
-		// A hex-looking fragment inside a word is diagnostic text, not an IP:
-		// std::string, core::panicking, and Unicode identifiers must survive.
-		before, _ := utf8.DecodeLastRuneInString(s[:start])
-		after, _ := utf8.DecodeRuneInString(s[end:])
-		if ipWord(before) || ipWord(after) {
-			continue
-		}
 		tok := s[start:end]
 		candidate := tok
 		ip := net.ParseIP(candidate)
@@ -260,8 +253,16 @@ func (r *redactor) addresses(s string) string {
 		if ip.To4() != nil {
 			replacement, rule = "[ipv4]", "IPv4 address"
 		}
-		r.removed[rule]++
 		at := start + strings.Index(tok, candidate)
+		// A hex-looking fragment inside a word is diagnostic text, not an IP:
+		// std::string, core::panicking, and Unicode identifiers must survive.
+		// Check around the parsed address so separators like "ip:" still count.
+		before, _ := utf8.DecodeLastRuneInString(s[:at])
+		after, _ := utf8.DecodeRuneInString(s[at+len(candidate):])
+		if ipWord(before) || ipWord(after) {
+			continue
+		}
+		r.removed[rule]++
 		out.WriteString(s[written:at])
 		out.WriteString(replacement)
 		written = at + len(candidate)
