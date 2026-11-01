@@ -839,6 +839,24 @@ func TestResumeUnboundDraftFallsBackToLookup(t *testing.T) {
 	}
 }
 
+// TestAccountLookupFailureFailsClosed: if gh cannot say who is signed in, neither Submit nor Resume writes.
+func TestAccountLookupFailureFailsClosed(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	f.out["api user"] = "\n"
+	if _, err := Submit(context.Background(), f.exec, dir, draft); !errors.Is(err, ErrNotSignedIn) || f.count(create) != 0 {
+		t.Fatal("empty login must not start a write", err, f.calls)
+	}
+	f = newFake()
+	f.fail["issue create"] = true
+	Submit(context.Background(), f.exec, dir, draft)
+	p, _ := Pending(dir)
+	f = newFake()
+	f.fail["api user"] = true
+	if _, err := Resume(context.Background(), f.exec, dir, p[0].ReportID); err == nil || f.count(create) != 0 || f.count("api --paginate") != 0 {
+		t.Fatal("failed account lookup must stop resume before any lookup or write", err, f.calls)
+	}
+}
+
 func shots(t *testing.T, n int, ext string, size int) []string {
 	src := t.TempDir()
 	var ps []string
@@ -911,6 +929,47 @@ func TestScreenshotsResume(t *testing.T) {
 	}
 	if p, _ := Pending(dir); len(p) != 0 {
 		t.Fatal(p)
+	}
+}
+
+func TestResumeRefusesDraftEditedOnDisk(t *testing.T) {
+	for _, edit := range []string{"body", "screenshot"} {
+		f, dir := newFake(), t.TempDir()
+		d := draft
+		d.ReportID = NewReportID()
+		d.Screenshots = shots(t, 1, ".gif", 10)
+		f.fail["issue comment"] = true // leave an unfinished draft
+		Submit(context.Background(), f.exec, dir, d)
+		state := filepath.Join(dir, d.ReportID, "state.json")
+		s, _ := load(state)
+		if edit == "body" {
+			s.Draft.Body += " edited"
+			b, _ := json.Marshal(s)
+			os.WriteFile(state, b, 0o600)
+		} else {
+			os.WriteFile(s.Draft.Screenshots[0], []byte("other image"), 0o600)
+		}
+		before, _ := os.ReadFile(state)
+		f = newFake()
+		if _, err := Resume(context.Background(), f.exec, dir, d.ReportID); !errors.Is(err, ErrDraftChanged) || len(f.calls) != 0 {
+			t.Fatalf("%s: err=%v calls=%v", edit, err, f.calls)
+		}
+		if after, _ := os.ReadFile(state); !bytes.Equal(before, after) {
+			t.Fatalf("%s: edited draft was overwritten", edit)
+		}
+	}
+}
+
+func TestPendingListsReadableDraftsBesideCorruptOne(t *testing.T) {
+	dir := t.TempDir()
+	if err := save(dir, &Saved{ReportID: "good", Stage: LabelsDone, Draft: draft}); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(dir, "bad"), 0o700)
+	os.WriteFile(filepath.Join(dir, "bad", "state.json"), []byte(`{"ReportID":`), 0o600)
+	p, err := Pending(dir)
+	if err == nil || len(p) != 1 || p[0].ReportID != "good" {
+		t.Fatal(p, err)
 	}
 }
 

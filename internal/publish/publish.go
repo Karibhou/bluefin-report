@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -209,7 +210,13 @@ type Saved struct {
 	GistURL   string
 	IssueURL  string
 	StartedAt time.Time
+	// Digest covers the reviewed draft (screenshot bytes included); Resume refuses a draft edited on disk.
+	// Empty for drafts saved before it existed, which are trusted.
+	Digest string `json:",omitempty"`
 }
+
+// ErrDraftChanged means a saved draft no longer matches what was reviewed, so Resume will never publish it.
+var ErrDraftChanged = errors.New("it was not published. Discard it from Drafts and start a new report")
 
 var ErrNotSignedIn = errors.New("gh is not signed in; run `gh auth login`")
 
@@ -371,12 +378,19 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	if err != nil {
 		return Result{}, err
 	}
+	account := strings.TrimSpace(string(login))
+	if account == "" {
+		return Result{}, ErrNotSignedIn
+	}
 	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
 	if err != nil {
 		return Result{}, err
 	}
 	d.Screenshots = shots
-	s = &Saved{ReportID: d.ReportID, Account: strings.TrimSpace(string(login)), Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
+	s = &Saved{ReportID: d.ReportID, Account: account, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
+	if s.Digest, err = digest(d); err != nil {
+		return Result{}, err
+	}
 	if err := save(stateDir, s); err != nil {
 		return Result{}, err
 	}
@@ -392,6 +406,15 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 	if !slices.Contains(Repos, s.Draft.Repo) { // drafts saved under older routing
 		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", s.Draft.Repo)
 	}
+	if s.Stage != Published && s.Digest != "" {
+		got, err := digest(s.Draft)
+		if err != nil {
+			return Result{}, fmt.Errorf("report %s: saved draft is damaged (%v); %w", reportID, err, ErrDraftChanged)
+		}
+		if got != s.Digest {
+			return Result{}, fmt.Errorf("report %s was changed on disk after review; %w", reportID, ErrDraftChanged)
+		}
+	}
 	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
 		return Result{}, ErrNotSignedIn
 	}
@@ -402,9 +425,9 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 		// so stop with guidance instead of performing another remote write. Drafts saved before the
 		// account was recorded (s.Account == "") cannot be bound, so fall back to the plain lookup.
 		if s.Account != "" {
-			login, _, aerr := gh(ctx, nil, "api", "user", "--jq", ".login")
-			if aerr != nil {
-				return Result{}, aerr
+			login, _, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+			if err != nil {
+				return Result{}, err
 			}
 			if got := strings.TrimSpace(string(login)); got != s.Account {
 				return Result{}, fmt.Errorf("cannot resume report %s: it was started with gh account %q, but gh is now signed in as %q. Sign back into %q with \"gh auth login\", resume there, or discard this draft and start a new report", s.ReportID, s.Account, got, s.Account)
@@ -427,16 +450,40 @@ func Pending(stateDir string) ([]Saved, error) {
 		return nil, err
 	}
 	var out []Saved
+	var errs []error
 	for _, f := range files {
 		s, err := load(f)
 		if err != nil {
-			return nil, err
+			errs = append(errs, fmt.Errorf("%s: %w", filepath.Base(filepath.Dir(f)), err))
+			continue // one unreadable draft must not hide the others
 		}
 		if s.Stage != Published {
 			out = append(out, *s)
 		}
 	}
-	return out, nil
+	return out, errors.Join(errs...)
+}
+
+// digest hashes everything Review showed: the draft fields and each screenshot copy's name and bytes.
+func digest(d Draft) (string, error) {
+	shots := d.Screenshots
+	d.Screenshots = nil
+	b, err := json.Marshal(d)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%d:", len(b))
+	h.Write(b)
+	for _, p := range shots {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "%s:%d:", filepath.Base(p), len(data))
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // lookup decides from GitHub what an interrupted write actually did. It uses REST
