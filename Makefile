@@ -23,6 +23,7 @@ screenshots: build
 lint:
 	test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 	go vet ./...
+	go mod tidy -diff
 
 validate-data:
 	desktop-file-validate data/io.projectbluefin.Report.desktop

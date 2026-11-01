@@ -34,13 +34,21 @@ bluefin-report --dry-run         # full flow, but gh calls are logged, not run
 bluefin-report --print-summary   # collect a snapshot and print the overview, no UI
 ```
 
+Browse All Metrics filters the collected snapshot as you type. Each row has a
+Copy button for its complete value, including text shortened on screen. An empty
+search result explains how to recover; an empty collection is shown separately.
+
 ## Privacy
 
 - Removed before you ever see it: hostname, machine ID, boot ID, machine-info,
   hardware serial numbers, system UUID and asset tags, report-signing keys,
   your username, MAC/IPv4/IPv6 addresses, email addresses, and home paths
-  (`/home/<user>` → `~`). Pattern redaction is best-effort; the Review page
-  lists every removal with a count.
+  (`/home/<user>` → `~`). Compressed IPv6 (including IPv4-mapped addresses)
+  is scrubbed even in brackets or next to sentence punctuation, and IPv4
+  endpoints keep their port (`192.0.2.128:443` → `[ipv4]:443`). Whole-word
+  boundaries preserve diagnostic identifiers (including Unicode), C++/Rust
+  backtraces, versions and times. Pattern redaction is best-effort; the Review
+  page lists every removal with a count.
 - Never sent unless you opt in per entry: file contents (`io.systemd.Files.*`)
   and user-session metrics.
 - Diagnostics, each off by default and not even collected unless switched on in Compose:
@@ -54,7 +62,8 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
   An unfinished report can be retried under the same ID only with its unchanged
   reviewed draft (including its report, area, and screenshots). Resume from Drafts
   publishes that unchanged saved version; start a new report to publish edits instead.
-  Unreadable or corrupt saved state is not overwritten.
+  A draft whose files were changed on disk after Review is refused, not published.
+  Unreadable or corrupt saved state is not overwritten, and the other drafts are still listed.
 - The full report is attached publicly to the issue as `systemd-report.json`
   (an issue artifact): anyone who can see the issue can read it. Only if GitHub
   refuses artifacts does it fall back to a secret gist linked in an issue comment.
@@ -72,7 +81,7 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 ```bash
 make test           # go test -race ./...
 make run            # build and run with --dry-run
-make lint           # gofmt + go vet
+make lint           # gofmt + go vet + go mod tidy -diff
 make validate-data  # desktop-file-validate (+ appstreamcli if present)
 make screenshots    # capture the running app locally; requires Xvfb/AT-SPI
 make bump           # tag the next release, YY.MM.N (does not push)
