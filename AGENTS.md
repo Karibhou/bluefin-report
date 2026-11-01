@@ -21,8 +21,10 @@ Design and status: [systemd-report-design-plan.md](systemd-report-design-plan.md
   which reuses one package-level callback.
 - Tests never call the real `gh` for writes. Use `--dry-run` to drive the full flow by hand;
   it logs `gh` calls instead of running them.
-- Releases are calendar versions `YY.MM.N`, tagged deliberately with `make bump`
-  (never per commit, never by hand-picking a number). Agents do not tag or push releases.
+- Releases are calendar versions `YY.MM.N`, allocated by `scripts/next-version.sh`.
+  The scheduled release workflow publishes only after checks and live screenshots;
+  manual workflow runs default to a non-publishing snapshot. Never release per commit.
+  Agents do not cut or push actual release tags while developing or verifying automation.
 - Never weaken the privacy scrubber to make a test pass; the attachment must not contain hostname or username.
 
 ## Checks

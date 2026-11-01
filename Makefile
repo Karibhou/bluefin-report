@@ -1,6 +1,8 @@
-.PHONY: build test run lint validate-data bump
+.PHONY: build test run lint validate-data bump screenshots
 
 BUILD_DIR=build
+SCREENSHOT_DIR ?= $(BUILD_DIR)/screenshots
+PYTHON ?= python3
 export CGO_ENABLED=0
 
 build:
@@ -12,6 +14,11 @@ test:
 
 run: build
 	./$(BUILD_DIR)/bluefin-report --dry-run
+
+# Requires a supported GTK/Libadwaita runtime, AT-SPI, Xvfb, xdotool and ImageMagick.
+screenshots: build
+	xvfb-run -a -s "-screen 0 1280x1024x24" dbus-run-session -- \
+		$(PYTHON) scripts/capture-screenshots.py --binary $(BUILD_DIR)/bluefin-report --output $(SCREENSHOT_DIR)
 
 lint:
 	test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }

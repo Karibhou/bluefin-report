@@ -68,6 +68,22 @@ func TestProbeToleratesMissingSources(t *testing.T) {
 	}
 }
 
+// The screenshot fixture tree must stand in for the host entirely, commands included.
+func TestProbeScreenshotFixtureRoot(t *testing.T) {
+	root, err := filepath.Abs("testdata/root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	Root = root
+	t.Cleanup(func() { Root = "/" })
+	t.Setenv("PATH", filepath.Join(root, "usr/bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	want := Identity{Ref: "ghcr.io/projectbluefin/dakota-gaming:20261031", Tag: "20261031", Digest: "sha256:0000fixture",
+		CPU: "AMD Ryzen 7 7840U w/ Radeon 780M Graphics", GPU: "AMD 1002:15BF (amdgpu)", GNOME: "49.1"}
+	if got := Probe(context.Background()); got != want {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
 func TestCollectOnlyOptedIn(t *testing.T) {
 	calls := stub(t, map[string]string{"coredumpctl list --no-pager --since -7d": "TIME PID\nx 1 /usr/bin/foo"})
 	if got := Collect(context.Background(), nil); len(got) != 0 || len(*calls) != 0 {

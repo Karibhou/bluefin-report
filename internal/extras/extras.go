@@ -17,13 +17,17 @@ import (
 // Identity is shown in the Overview and the issue summary table.
 type Identity struct{ Ref, Tag, Digest, CPU, GPU, GNOME string }
 
-// Root prefixes every file read; tests point it at fixtures.
+// Root prefixes every file read and absolute command; tests and screenshot
+// captures point it at fixtures.
 var Root = "/"
 
 // run is replaced in tests; output is capped at 64 KiB.
 var run = func(ctx context.Context, name string, args ...string) string {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	if filepath.IsAbs(name) {
+		name = filepath.Join(Root, name)
+	}
 	out, _ := exec.CommandContext(ctx, name, args...).Output()
 	if len(out) > 64<<10 {
 		out = out[len(out)-64<<10:] // keep the newest lines

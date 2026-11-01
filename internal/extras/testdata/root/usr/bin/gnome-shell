@@ -1,0 +1,3 @@
+#!/bin/sh
+# Screenshot fixture stub for gnome-shell.
+echo "GNOME Shell 49.1"

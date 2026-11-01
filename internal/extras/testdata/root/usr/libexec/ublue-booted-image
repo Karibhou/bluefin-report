@@ -1,0 +1,6 @@
+#!/bin/sh
+# Screenshot fixture stub for ublue-booted-image.
+case "$1" in
+ref) echo ghcr.io/projectbluefin/dakota-gaming:20261031 ;;
+tag) echo 20261031 ;;
+esac
