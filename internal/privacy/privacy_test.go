@@ -2,6 +2,7 @@ package privacy
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -75,6 +76,37 @@ func TestBuildRemovesIdentifiersAndKeepsDiagnostics(t *testing.T) {
 	if p.Removed["identifying metric"] != 12 || p.Removed["MAC address"] != 1 || p.Removed["IPv4 address"] != 1 ||
 		p.Removed["IPv6 address"] != 1 || p.Removed["email"] != 1 || p.Removed["home path"] != 1 {
 		t.Errorf("Removed = %v", p.Removed)
+	}
+}
+
+// A rejected system report arrives as an empty Report; the hostname must still not leak via user metrics.
+func TestBuildScrubsHostnameWithoutSystemReport(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil || len(host) < 3 {
+		t.Skipf("os.Hostname() = %q, %v: too short for literal scrubbing", host, err)
+	}
+	s := snapshot.Snapshot{User: snapshot.Report{Metrics: []snapshot.Metric{
+		metric("io.systemd.Manager.UnitActiveState", host+"-sync.service", "active"),
+		metric("io.systemd.Basic.KernelVersion", "", "running on "+host),
+	}}}
+	p, err := Build(s, Options{IncludeUser: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(p.JSON), host) {
+		t.Errorf("payload leaks os hostname %q:\n%s", host, p.JSON)
+	}
+
+	// The metric path still works for a hostname that differs from os.Hostname.
+	s.System.Metrics = []snapshot.Metric{metric("io.systemd.Basic.Hostname", "", "zz-synthetic-host")}
+	s.User.Metrics = append(s.User.Metrics, metric("io.systemd.Basic.KernelVersion", "", "zz-synthetic-host booted"))
+	if p, err = Build(s, Options{IncludeUser: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{host, "zz-synthetic-host"} {
+		if strings.Contains(string(p.JSON), secret) {
+			t.Errorf("payload leaks %q:\n%s", secret, p.JSON)
+		}
 	}
 }
 
