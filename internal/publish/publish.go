@@ -199,14 +199,25 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	if d.ReportID == "" {
 		d.ReportID = NewReportID()
 	}
-	// Same report submitted again (retry after a failure): continue it, never start over.
-	if s, err := load(filepath.Join(stateDir, d.ReportID, "state.json")); err == nil {
+	// Same report submitted again: only resume the payload that was reviewed.
+	s, err := load(filepath.Join(stateDir, d.ReportID, "state.json"))
+	if err == nil {
 		if s.Stage == Published {
 			return Result{IssueURL: s.IssueURL, GistURL: s.GistURL}, nil
 		}
+		saved := s.Draft
+		if saved.ReportID != d.ReportID || saved.Mode != d.Mode || saved.Repo != d.Repo ||
+			saved.Title != d.Title || saved.Body != d.Body || saved.IssueRef != d.IssueRef ||
+			saved.Queue != d.Queue || (saved.Attachment == nil) != (d.Attachment == nil) ||
+			!bytes.Equal(saved.Attachment, d.Attachment) {
+			return Result{}, fmt.Errorf("report %s differs from its saved draft; the changed report was not published. Resume the unchanged saved version from Drafts, or start a new report for these edits", d.ReportID)
+		}
 		return Resume(ctx, gh, stateDir, d.ReportID)
 	}
-	s := &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
+	if !errors.Is(err, os.ErrNotExist) {
+		return Result{}, err
+	}
+	s = &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d, StartedAt: time.Now().UTC()}
 	if err := save(stateDir, s); err != nil {
 		return Result{}, err
 	}

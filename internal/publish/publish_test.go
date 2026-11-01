@@ -1,7 +1,9 @@
 package publish
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -122,6 +124,123 @@ func TestGistFailureResumesWithoutDuplicate(t *testing.T) {
 	// Submitting a published report again is a no-op.
 	if _, err := Submit(context.Background(), f.exec, dir, d); err != nil || f.count("issue create") != 1 {
 		t.Fatal(err, f.calls)
+	}
+}
+
+func TestSubmitRejectsChangedDraftOnRetry(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*Draft)
+	}{
+		{"body", func(d *Draft) { d.Body = "freshly reviewed body" }},
+		{"title", func(d *Draft) { d.Title = "freshly reviewed title" }},
+		{"repo", func(d *Draft) { d.Repo = "projectbluefin/common" }},
+		{"mode", func(d *Draft) { d.Mode = Confirm }},
+		{"issue reference", func(d *Draft) { d.IssueRef = "4" }},
+		{"queue", func(d *Draft) { d.Queue = "another-queue" }},
+		{"attachment", func(d *Draft) { d.Attachment = []byte(`{"reviewed":true}`) }},
+		{"removed attachment", func(d *Draft) { d.Attachment = nil }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, dir := newFake(), t.TempDir()
+			f.fail["issue create"] = true
+			d := draft
+			d.ReportID, d.IssueRef = NewReportID(), "3"
+			if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+				t.Fatal("want first issue write to fail")
+			}
+			path := filepath.Join(dir, d.ReportID, "state.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := len(f.calls)
+			f.fail["issue create"] = false
+			changed := d
+			tt.change(&changed)
+			if _, err := Submit(context.Background(), f.exec, dir, changed); err == nil {
+				t.Fatal("want draft mismatch error")
+			}
+			if len(f.calls) != calls+1 || f.calls[calls] != "auth status" {
+				t.Fatal("changed retry must not look up or publish the saved payload", f.calls[calls:])
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("changed retry modified saved state", err)
+			}
+			// The unchanged consented draft can still resolve the uncertain write
+			// and retry without recreating the already-uploaded attachment.
+			r, err := Submit(context.Background(), f.exec, dir, d)
+			if err != nil || r.IssueURL == "" || f.count("gist create") != 1 || f.count("issue create") != 2 {
+				t.Fatal("unchanged retry failed", r, err, f.calls)
+			}
+		})
+	}
+}
+
+func TestSubmitDistinguishesMissingAndEmptyAttachment(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID, d.Attachment = NewReportID(), []byte{}
+	s := &Saved{ReportID: d.ReportID, Stage: Reviewed, Draft: d}
+	if err := save(dir, s); err != nil {
+		t.Fatal(err)
+	}
+	d.Attachment = nil
+	if _, err := Submit(context.Background(), f.exec, dir, d); err == nil {
+		t.Fatal("removing an empty attachment must require explicit review")
+	}
+	if len(f.calls) != 1 || f.calls[0] != "auth status" {
+		t.Fatal("attachment mismatch caused remote work", f.calls)
+	}
+}
+
+func TestSubmitPreservesCorruptState(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID = NewReportID()
+	reportDir := filepath.Join(dir, d.ReportID)
+	if err := os.MkdirAll(reportDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(reportDir, "state.json")
+	before := []byte(`{"ReportID":`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Submit(context.Background(), f.exec, dir, d)
+	var syntaxError *json.SyntaxError
+	if !errors.As(err, &syntaxError) {
+		t.Fatalf("want original corrupt-state error, got %v", err)
+	}
+	if len(f.calls) != 1 || f.calls[0] != "auth status" {
+		t.Fatal("corrupt state caused remote work", f.calls)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("corrupt state was overwritten", err)
+	}
+}
+
+func TestSubmitPreservesUnreadableState(t *testing.T) {
+	f, dir := newFake(), t.TempDir()
+	d := draft
+	d.ReportID = NewReportID()
+	path := filepath.Join(dir, d.ReportID, "state.json")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Submit(context.Background(), f.exec, dir, d)
+	var pathError *os.PathError
+	if !errors.As(err, &pathError) || pathError.Op != "read" {
+		t.Fatalf("want original unreadable-state error, got %v", err)
+	}
+	if len(f.calls) != 1 || f.calls[0] != "auth status" {
+		t.Fatal("unreadable state caused remote work", f.calls)
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatal("unreadable state was replaced", err)
 	}
 }
 

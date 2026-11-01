@@ -35,6 +35,10 @@ bluefin-report --print-summary   # collect a snapshot and print the overview, no
 - Never sent unless you opt in per entry: file contents (`io.systemd.Files.*`)
   and user-session metrics.
 - Sent byte-for-byte as shown in Review; editing anything withdraws consent.
+  An unfinished report can be retried under the same ID only with its unchanged
+  reviewed draft (including its attachment). Resume from Drafts publishes that
+  unchanged saved version; start a new report to publish edits instead.
+  Unreadable or corrupt saved state is not overwritten.
 - Raw snapshots stay in memory. Drafts keep only the reviewed payload under
   `$XDG_STATE_HOME/bluefin-report/drafts/` (mode 0700/0600). Discarding a
   draft never deletes anything already on GitHub.
