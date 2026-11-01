@@ -97,9 +97,10 @@ type ui struct {
 	health     *gtk.ListBox
 
 	// metrics
-	metrics *gtk.StringList
-	filter  *gtk.StringFilter
-	search  *gtk.SearchEntry
+	metrics     *gtk.StringList
+	filter      *gtk.StringFilter
+	search      *gtk.SearchEntry
+	syncResults func() // filtered n-items notify misses 0→0 when the store empties under a query
 
 	// compose
 	mode        publish.Mode
@@ -239,9 +240,9 @@ func (u *ui) activate() {
 			}
 		}
 	})
-	// Draft rows are rebuilt on every refresh; their buttons target these two
-	// actions with the report ID, so no per-row closure is ever connected.
-	idAction := func(name string, cb func(id string)) *gio.SimpleAction {
+	// Rows rebuilt on refresh target these string-parameter actions (report ID,
+	// metric value, screenshot path), so no per-row closure is ever connected.
+	stringAction := func(name string, cb func(s string)) *gio.SimpleAction {
 		a := gio.NewSimpleAction(name, glib.NewVariantType("s"))
 		a.ConnectActivate(hold(func(_ gio.SimpleAction, p uintptr) {
 			cb((*(**glib.Variant)(unsafe.Pointer(&p))).GetString(nil))
@@ -249,12 +250,12 @@ func (u *ui) activate() {
 		u.win.AddAction(a)
 		return a
 	}
-	idAction("copy-metric", func(value string) {
+	stringAction("copy-metric", func(value string) {
 		u.win.GetClipboard().SetText(value)
 		u.toast("Metric value copied")
 	})
-	idAction("draft-resume", u.resume)
-	u.discardAct = idAction("draft-discard", func(id string) {
+	stringAction("draft-resume", u.resume)
+	u.discardAct = stringAction("draft-discard", func(id string) {
 		if u.publishing {
 			u.toast("Wait for publishing to finish")
 			return
@@ -262,7 +263,7 @@ func (u *ui) activate() {
 		u.discardID = id
 		u.discardDlg.Present(&u.win.Widget)
 	})
-	idAction("shot-remove", func(path string) {
+	stringAction("shot-remove", func(path string) {
 		u.shots = slices.DeleteFunc(u.shots, func(p string) bool { return p == path })
 		u.syncShots()
 	})
@@ -527,6 +528,7 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 		rows = append(rows, row("user: ", m))
 	}
 	u.metrics.Splice(0, u.metrics.GetNItems(), rows)
+	u.syncResults()
 	u.ovStack.SetVisibleChildName("ready")
 	u.syncReview()
 }
@@ -593,28 +595,24 @@ func (u *ui) buildMetrics() {
 	results.AddNamed(&sw.Widget, "results")
 	results.AddNamed(&empty.Widget, "empty")
 	results.SetVexpand(true)
-	updateResults := func() {
+	u.syncResults = func() {
 		if model.GetNItems() > 0 {
 			results.SetVisibleChildName("results")
 			return
 		}
-		if u.search.GetText() != "" {
-			empty.SetTitle("No Results Found")
-			empty.SetDescription("Try a different search or clear the filter.")
-		} else {
-			empty.SetTitle("No Metrics Available")
-			empty.SetDescription("Refresh the snapshot and check the Overview for collection warnings.")
-		}
+		title, desc := emptyState(u.metrics.GetNItems(), u.search.GetText())
+		empty.SetTitle(title)
+		empty.SetDescription(desc)
 		results.SetVisibleChildName("empty")
 	}
-	model.ConnectNotify(hold(func(gobject.Object, uintptr) { updateResults() }))
+	model.ConnectNotify(hold(func(gobject.Object, uintptr) { u.syncResults() }))
 
 	search := gtk.NewSearchEntry()
 	u.search = search
 	search.SetPlaceholderText("Filter metrics")
 	search.ConnectSearchChanged(hold(func(gtk.SearchEntry) {
 		u.filter.SetSearch(search.GetText())
-		updateResults()
+		u.syncResults()
 	}))
 	search.SetMarginTop(6)
 	search.SetMarginBottom(6)
@@ -624,8 +622,17 @@ func (u *ui) buildMetrics() {
 	box := gtk.NewBox(gtk.OrientationVerticalValue, 0)
 	box.Append(&search.Widget)
 	box.Append(&results.Widget)
-	updateResults()
+	u.syncResults()
 	u.nav.Add(u.page("Metrics", "metrics", nil, &box.Widget))
+}
+
+// emptyState picks the metrics status page text: an empty collection wins over
+// a non-matching query so a retained search never hides a failed collection.
+func emptyState(total uint32, query string) (title, desc string) {
+	if total > 0 && query != "" {
+		return "No Results Found", "Try a different search or clear the filter."
+	}
+	return "No Metrics Available", "Refresh the snapshot and check the Overview for collection warnings."
 }
 
 // ---------- Compose ----------
