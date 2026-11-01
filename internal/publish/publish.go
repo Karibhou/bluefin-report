@@ -34,6 +34,7 @@ type Mode int
 const (
 	NewIssue Mode = iota
 	Confirm
+	Update
 )
 
 type Draft struct {
@@ -188,14 +189,13 @@ const (
 	GistCreated    Stage = "GistCreated"  // fallback gist exists; its link comment not yet posted
 	Published      Stage = "Published"
 	ShotsPending   Stage = "ShotsPending"   // NewIssue: report done; screenshots comment not yet confirmed
-	CommentPending Stage = "CommentPending" // Confirm: report attached; the "same problem" comment not yet confirmed
+	CommentPending Stage = "CommentPending" // Confirm/Update: report attached; comment not yet confirmed
 	Uncertain      Stage = "Uncertain"
 )
 
-// artifactName names the issue artifact holding the full report. Confirm adds a report to someone
-// else's issue, so its name carries the report ID to stay unique per reporter.
+// artifactName gives each addition to an existing issue its own report artifact.
 func artifactName(d Draft) string {
-	if d.Mode == Confirm {
+	if d.Mode == Confirm || d.Mode == Update {
 		return "systemd-report-" + d.ReportID + ".json"
 	}
 	return "systemd-report.json"
@@ -326,11 +326,52 @@ func ParseIssueRef(repo, ref string) (int, error) {
 	return n, nil
 }
 
+// issueBody is the exact NewIssue payload, including all publisher-added text.
+func issueBody(d Draft) string {
+	body := d.Body
+	if d.Attachment != nil {
+		body += "\n\nFull report: `" + artifactName(d) + "`, attached to this issue (or linked in a comment below)"
+	}
+	body += "\n\n<!-- bluefin-report-id: " + d.ReportID + " -->"
+	if d.Queue != "" {
+		body += "\n<!-- hive-queue: " + d.Queue + " -->"
+	}
+	return body
+}
+
+func validateDraft(d Draft) error {
+	switch d.Mode {
+	case NewIssue:
+		if n := len(issueBody(d)); n > 60*1024 {
+			return fmt.Errorf("issue body is %d bytes; the limit is %d bytes including report metadata. Return to Review and shorten the report by at least %d bytes; nothing was published", n, 60*1024, n-60*1024)
+		}
+	case Confirm, Update:
+		if _, err := ParseIssueRef(d.Repo, d.IssueRef); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown publish mode %d", d.Mode)
+	}
+	return nil
+}
+
+func authenticatedAccount(ctx context.Context, gh Exec) (string, error) {
+	out, _, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+	if err != nil {
+		return "", err
+	}
+	account := strings.TrimSpace(string(out))
+	if account == "" {
+		return "", ErrNotSignedIn
+	}
+	return account, nil
+}
+
 func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, error) {
 	if !slices.Contains(Repos, d.Repo) {
 		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", d.Repo)
 	}
-	if d.Mode == Confirm {
+	if d.Mode == Confirm || d.Mode == Update {
 		n, err := ParseIssueRef(d.Repo, d.IssueRef)
 		if err != nil {
 			return Result{}, err
@@ -346,6 +387,9 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	}
 	if err == nil && s.Stage == Published {
 		return Result{IssueURL: s.IssueURL, GistURL: s.GistURL}, nil
+	}
+	if err := validateDraft(d); err != nil {
+		return Result{}, err
 	}
 	if err := checkScreenshots(d.Screenshots); err != nil {
 		return Result{}, err
@@ -374,13 +418,18 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 	// Persist the authenticated identity before the first write so an uncertain write can later
 	// be resolved only under the account that started it; a switch to another account must not be
 	// able to look the write up as "not found" and resume it as a duplicate.
-	login, _, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+	account, err := authenticatedAccount(ctx, gh)
 	if err != nil {
 		return Result{}, err
 	}
-	account := strings.TrimSpace(string(login))
-	if account == "" {
-		return Result{}, ErrNotSignedIn
+	if d.Mode == Update { // an update speaks for the original reporter, so only they may post it
+		out, errb, err := gh(ctx, nil, "api", "repos/"+d.Repo+"/issues/"+d.IssueRef, "--jq", ".user.login")
+		if err != nil {
+			return Result{}, fmt.Errorf("could not read who opened issue #%s: %w: %s", d.IssueRef, err, strings.TrimSpace(string(errb)))
+		}
+		if author := strings.TrimSpace(string(out)); !strings.EqualFold(author, account) {
+			return Result{}, fmt.Errorf("issue #%s was opened by %s, but %s is signed in. Only the original reporter can add an update; use Confirm Existing Issue instead", d.IssueRef, author, account)
+		}
 	}
 	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
 	if err != nil {
@@ -415,6 +464,12 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 			return Result{}, fmt.Errorf("report %s was changed on disk after review; %w", reportID, ErrDraftChanged)
 		}
 	}
+	if s.Stage == Published {
+		return Result{IssueURL: s.IssueURL, GistURL: s.GistURL}, nil
+	}
+	if err := validateDraft(s.Draft); err != nil {
+		return Result{}, err
+	}
 	if _, _, err := gh(ctx, nil, "auth", "status"); err != nil {
 		return Result{}, ErrNotSignedIn
 	}
@@ -425,11 +480,11 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 		// so stop with guidance instead of performing another remote write. Drafts saved before the
 		// account was recorded (s.Account == "") cannot be bound, so fall back to the plain lookup.
 		if s.Account != "" {
-			login, _, err := gh(ctx, nil, "api", "user", "--jq", ".login")
+			got, err := authenticatedAccount(ctx, gh)
 			if err != nil {
 				return Result{}, err
 			}
-			if got := strings.TrimSpace(string(login)); got != s.Account {
+			if got != s.Account {
 				return Result{}, fmt.Errorf("cannot resume report %s: it was started with gh account %q, but gh is now signed in as %q. Sign back into %q with \"gh auth login\", resume there, or discard this draft and start a new report", s.ReportID, s.Account, got, s.Account)
 			}
 		}
@@ -516,15 +571,18 @@ func lookup(ctx context.Context, gh Exec, s *Saved) error {
 	s.Stage = Reviewed
 	marker := fmt.Sprintf(`.[] | select(.body // "" | contains("bluefin-report-id: %s")) | .html_url`, s.ReportID)
 	var path string
-	if s.Draft.Mode == Confirm {
+	if s.Draft.Mode == Confirm || s.Draft.Mode == Update {
 		path = fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100%s", s.Draft.Repo, s.Draft.IssueRef, since)
 	} else {
-		// creator=@me is not documented for this endpoint; use the real login.
-		out, _, err := gh(ctx, nil, "api", "user", "--jq", ".login")
-		if err != nil {
-			return err
+		// creator=@me is not documented for this endpoint; use the real login. Unbound legacy drafts look it up.
+		creator := s.Account
+		if creator == "" {
+			var err error
+			if creator, err = authenticatedAccount(ctx, gh); err != nil {
+				return err
+			}
 		}
-		path = fmt.Sprintf("repos/%s/issues?creator=%s&state=all&per_page=100%s", s.Draft.Repo, strings.TrimSpace(string(out)), since)
+		path = fmt.Sprintf("repos/%s/issues?creator=%s&state=all&per_page=100%s", s.Draft.Repo, creator, since)
 	}
 	url, err := find(path, marker)
 	if err != nil {
@@ -542,7 +600,7 @@ func lookup(ctx context.Context, gh Exec, s *Saved) error {
 func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	d := s.Draft
 	name := artifactName(d)
-	if d.Mode == Confirm && s.Stage == Reviewed { // the issue exists: go straight to attaching the report
+	if (d.Mode == Confirm || d.Mode == Update) && s.Stage == Reviewed { // existing issue: attach directly
 		s.IssueURL, s.Stage = "https://github.com/"+d.Repo+"/issues/"+d.IssueRef, LabelsDone
 	}
 	step := func(pending, done Stage, stdin []byte, args ...string) (string, error) {
@@ -564,14 +622,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	}
 	fresh, labeled := false, false // labels known only when the issue was created in this run
 	if s.Stage == Reviewed {
-		body := d.Body
-		if d.Attachment != nil {
-			body += "\n\nFull report: `" + name + "`, attached to this issue (or linked in a comment below)"
-		}
-		body += "\n\n<!-- bluefin-report-id: " + s.ReportID + " -->"
-		if d.Queue != "" {
-			body += "\n<!-- hive-queue: " + d.Queue + " -->"
-		}
+		body := issueBody(d)
 		// REST create: labels/type are silently dropped for non-maintainers instead of failing the create.
 		args := []string{"api", "--method", "POST", "repos/" + d.Repo + "/issues", "-f", "title=" + d.Title,
 			"-F", "body=@-", "-f", "labels[]=kind/bug"}
@@ -600,7 +651,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	if len(d.Screenshots) > 0 && d.Mode == NewIssue {
 		final = ShotsPending
 	}
-	if d.Mode == Confirm {
+	if d.Mode == Confirm || d.Mode == Update {
 		final = CommentPending
 	}
 	freshShots := false // ShotsPending reached in this run: no comment can exist yet
@@ -685,7 +736,7 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 	if s.Stage == GistCreated {
 		marker := "<!-- bluefin-report-id: " + s.ReportID + " -->"
 		posted := false
-		if !freshGist && d.Mode == NewIssue { // Confirm links the gist in its one comment instead
+		if !freshGist && d.Mode == NewIssue { // existing-issue modes link the gist in their one comment
 			out, errb, err := gh(ctx, nil, "api", "--paginate", fmt.Sprintf("repos/%s/issues/%s/comments?per_page=100", d.Repo, n),
 				"--jq", fmt.Sprintf(`.[] | select(.body // "" | contains(%q)) | .id`, marker))
 			if err != nil {
@@ -744,7 +795,11 @@ func run(ctx context.Context, gh Exec, dir string, s *Saved) (Result, error) {
 			case d.Attachment != nil:
 				body += "\n\nFull report: `" + name + "`, attached to this issue"
 			}
-			body += "\n\n" + marker + "\n<!-- bluefin-report-confirm -->"
+			kind := "confirm"
+			if d.Mode == Update {
+				kind = "update"
+			}
+			body += "\n\n" + marker + "\n<!-- bluefin-report-" + kind + " -->"
 			args := append([]string{"issue", "comment", "--repo", d.Repo, "--body-file", "-"}, attachArgs(d.Screenshots)...)
 			if _, errb, err := gh(ctx, []byte(body), append(args, "--", n)...); err != nil {
 				return warn("commenting", err, errb)
