@@ -13,6 +13,7 @@ import (
 	"codeberg.org/puregotk/puregotk/v4/glib"
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 
+	"github.com/projectbluefin/bluefin-report/internal/i18n"
 	"github.com/projectbluefin/bluefin-report/internal/publish"
 )
 
@@ -77,14 +78,14 @@ func (u *ui) run(id string, retry func(), step func(context.Context, publish.Exe
 				u.signInDlg.Present(&u.win.Widget)
 			case errors.Is(err, publish.ErrDraftChanged):
 				u.refreshDrafts()
-				u.showError("Couldn't Publish Report", err.Error())
+				u.showError(i18n.G("Couldn't Publish Report"), err.Error())
 			case err != nil:
 				u.refreshDrafts()
 				body := err.Error()
 				if u.resumable(id) {
-					body += "\n\nYour draft was kept. Resume it from Drafts."
+					body += "\n\n" + i18n.G("Your draft was kept. Resume it from Drafts.")
 				}
-				u.showError("Couldn't Publish Report", body)
+				u.showError(i18n.G("Couldn't Publish Report"), body)
 			default:
 				u.refreshDrafts()
 				u.doneURL = res.IssueURL
@@ -115,17 +116,17 @@ func (u *ui) buildDrafts() {
 	u.draftList = gtk.NewListBox()
 	u.draftList.SetSelectionMode(gtk.SelectionNoneValue)
 	u.draftList.AddCssClass("boxed-list")
-	g := group("Unfinished Reports")
-	g.SetDescription("Discarding only deletes the local copy, never anything already on GitHub")
+	g := group(i18n.G("Unfinished Reports"))
+	g.SetDescription(i18n.G("Discarding only deletes the local copy, never anything already on GitHub"))
 	g.Add(&u.draftList.Widget)
 	empty := adw.NewStatusPage()
 	empty.SetIconName("document-edit-symbolic")
-	empty.SetTitle("No Unfinished Reports")
-	empty.SetDescription("Reports that couldn't be published appear here")
+	empty.SetTitle(i18n.G("No Unfinished Reports"))
+	empty.SetDescription(i18n.G("Reports that couldn't be published appear here"))
 	u.draftsStack = gtk.NewStack()
 	u.draftsStack.AddNamed(scrolled(&g.Widget), "list")
 	u.draftsStack.AddNamed(&empty.Widget, "empty")
-	u.nav.Add(u.page("Drafts", "drafts", nil, &u.draftsStack.Widget))
+	u.nav.Add(u.page(i18n.G("Drafts"), "drafts", nil, &u.draftsStack.Widget))
 
 	// Discard is undoable: the draft leaves the list at once and its files go
 	// only when the toast is dismissed without Undo (or the window closes).
@@ -149,7 +150,7 @@ func (u *ui) buildDrafts() {
 		} else {
 			log.Printf("ui: deleting draft %s", id)
 			if err := publish.Discard(u.stateDir, id); err != nil {
-				u.showError("Couldn't Discard Draft", err.Error())
+				u.showError(i18n.G("Couldn't Discard Draft"), err.Error())
 			}
 		}
 		u.refreshDrafts()
@@ -179,21 +180,23 @@ func (u *ui) refreshDrafts() {
 		r := adw.NewActionRow()
 		t := s.Draft.Title
 		if t == "" {
-			t = "Comment on #" + s.Draft.IssueRef
+			// TRANSLATORS: %s is an issue number.
+			t = fmt.Sprintf(i18n.G("Comment on #%s"), s.Draft.IssueRef)
 			if s.Draft.Mode == publish.Update {
-				t = "Update on #" + s.Draft.IssueRef
+				// TRANSLATORS: %s is an issue number.
+				t = fmt.Sprintf(i18n.G("Update on #%s"), s.Draft.IssueRef)
 			}
 		}
 		r.SetTitle(t)
 		r.SetSubtitle(s.Draft.Repo + " · " + stageText(s))
-		resume := gtk.NewButtonWithLabel("Resume")
+		resume := gtk.NewButtonWithLabel(i18n.G("Resume"))
 		resume.SetValign(gtk.AlignCenterValue)
 		resume.AddCssClass("flat")
 		resume.SetActionName("win.draft-resume")
 		resume.SetActionTargetValue(glib.NewVariantString(s.ReportID))
 		r.AddSuffix(&resume.Widget)
 		discard := gtk.NewButtonFromIconName("user-trash-symbolic")
-		discard.SetTooltipText("Discard")
+		discard.SetTooltipText(i18n.G("Discard"))
 		discard.SetValign(gtk.AlignCenterValue)
 		discard.AddCssClass("flat")
 		discard.SetActionName("win.draft-discard")
@@ -203,7 +206,7 @@ func (u *ui) refreshDrafts() {
 	}
 	if err != nil { // the readable drafts are still listed above
 		r := adw.NewActionRow()
-		r.SetTitle("Some saved reports couldn't be read")
+		r.SetTitle(i18n.G("Some saved reports couldn't be read"))
 		r.SetSubtitle(err.Error())
 		r.SetSubtitleSelectable(true)
 		r.AddPrefix(&gtk.NewImageFromIconName("dialog-warning-symbolic").Widget)
@@ -220,21 +223,21 @@ func (u *ui) refreshDrafts() {
 func stageText(s publish.Saved) string {
 	switch {
 	case s.Stage == publish.Reviewed:
-		return "Not published yet"
+		return i18n.G("Not published yet")
 	case s.IssueURL != "":
-		return "Partly published"
+		return i18n.G("Partly published")
 	}
-	return "Interrupted while publishing"
+	return i18n.G("Interrupted while publishing")
 }
 
 // ---------- Sign-in ----------
 
 func (u *ui) buildSignIn() {
-	u.signInDlg = adw.NewAlertDialog("Sign In to GitHub",
-		"Publishing needs a GitHub account. Sign in with a one-time code in your browser; your draft is kept.")
+	u.signInDlg = adw.NewAlertDialog(i18n.G("Sign In to GitHub"),
+		i18n.G("Publishing needs a GitHub account. Sign in with a one-time code in your browser; your draft is kept."))
 	u.signInDlg.Ref()
-	u.signInDlg.AddResponse("cancel", "_Cancel")
-	u.signInDlg.AddResponse("signin", "_Sign In")
+	u.signInDlg.AddResponse("cancel", i18n.G("_Cancel"))
+	u.signInDlg.AddResponse("signin", i18n.G("_Sign In"))
 	u.signInDlg.SetDefaultResponse("signin")
 	u.signInDlg.SetResponseAppearance("signin", adw.ResponseSuggestedValue)
 	u.signInDlg.SetCloseResponse("cancel")
@@ -248,18 +251,18 @@ func (u *ui) buildSignIn() {
 	u.codeLabel.AddCssClass("title-1")
 	u.codeLabel.SetSelectable(true)
 	cp := gtk.NewButtonFromIconName("edit-copy-symbolic")
-	cp.SetTooltipText("Copy Code")
+	cp.SetTooltipText(i18n.G("Copy Code"))
 	cp.SetValign(gtk.AlignCenterValue)
 	cp.AddCssClass("flat")
 	cp.ConnectClicked(hold(func(gtk.Button) {
 		u.win.GetClipboard().SetText(u.codeLabel.GetText())
-		u.toast("Code copied")
+		u.toast(i18n.G("Code copied"))
 	}))
 	code := gtk.NewBox(gtk.OrientationHorizontalValue, 6)
 	code.SetHalign(gtk.AlignCenterValue)
 	code.Append(&u.codeLabel.Widget)
 	code.Append(&cp.Widget)
-	open := pill("Open Browser", func() {
+	open := pill(i18n.G("Open Browser"), func() {
 		gtk.NewUriLauncher(u.codeURL).Launch(&u.win.Window, nil, nil, 0)
 	})
 	open.AddCssClass("suggested-action")
@@ -268,10 +271,10 @@ func (u *ui) buildSignIn() {
 	box.Append(&code.Widget)
 	box.Append(&open.Widget)
 
-	u.codeDlg = adw.NewAlertDialog("Enter this code on GitHub", "Copy the code, open the browser, and paste it there. This closes by itself once GitHub confirms.")
+	u.codeDlg = adw.NewAlertDialog(i18n.G("Enter this code on GitHub"), i18n.G("Copy the code, open the browser, and paste it there. This closes by itself once GitHub confirms."))
 	u.codeDlg.Ref()
 	u.codeDlg.SetExtraChild(&box.Widget)
-	u.codeDlg.AddResponse("cancel", "_Cancel")
+	u.codeDlg.AddResponse("cancel", i18n.G("_Cancel"))
 	u.codeDlg.SetCloseResponse("cancel")
 	u.codeDlg.ConnectResponse(hold(func(adw.AlertDialog, string) {
 		if u.signCancel != nil {
@@ -306,11 +309,11 @@ func (u *ui) signIn() {
 			log.Printf("ui: sign-in finished: err=%v", err)
 			if err != nil {
 				if ctx.Err() == nil { // not cancelled by the user
-					u.showError("Couldn't Sign In", err.Error())
+					u.showError(i18n.G("Couldn't Sign In"), err.Error())
 				}
 				return
 			}
-			u.toast("Signed in to GitHub")
+			u.toast(i18n.G("Signed in to GitHub"))
 			if u.retry != nil {
 				u.retry()
 			}
@@ -323,14 +326,14 @@ func (u *ui) signIn() {
 func (u *ui) buildDone() {
 	u.donePage = adw.NewStatusPage()
 	u.donePage.SetIconName("object-select-symbolic") // emblem-ok-symbolic is gone from the Adwaita icon theme
-	u.donePage.SetTitle("Report published")
-	open := pill("Open Issue", func() {
+	u.donePage.SetTitle(i18n.G("Report published"))
+	open := pill(i18n.G("Open Issue"), func() {
 		gtk.NewUriLauncher(u.doneURL).Launch(&u.win.Window, nil, nil, 0)
 	})
 	open.AddCssClass("suggested-action")
-	cp := pill("Copy Link", func() {
+	cp := pill(i18n.G("Copy Link"), func() {
 		u.win.GetClipboard().SetText(u.doneURL)
-		u.toast("Link copied")
+		u.toast(i18n.G("Link copied"))
 	})
 	btns := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
 	btns.SetHomogeneous(true) // HIG: adjacent buttons share a width
@@ -338,5 +341,5 @@ func (u *ui) buildDone() {
 	btns.Append(&open.Widget)
 	btns.Append(&cp.Widget)
 	u.donePage.SetChild(&btns.Widget)
-	u.nav.Add(u.page("Done", "done", nil, &u.donePage.Widget))
+	u.nav.Add(u.page(i18n.G("Done"), "done", nil, &u.donePage.Widget))
 }

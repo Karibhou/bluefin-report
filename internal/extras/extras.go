@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/projectbluefin/bluefin-report/internal/i18n"
 )
 
 // Identity is shown in the Overview and the issue summary table.
@@ -129,6 +131,7 @@ func gpus() string {
 }
 
 // Section is one opt-in block. Details marks those also shown, collapsed, in the issue body.
+// Title is English, as the issue body needs; the UI shows it through i18n.G.
 type Section struct {
 	Key, Title string
 	Details    bool
@@ -136,10 +139,10 @@ type Section struct {
 }
 
 var Sections = []Section{
-	{"bootErrors", "Errors From This Boot", true, []string{"journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short", "--no-hostname"}},
-	{"crashes", "Crashes in the Last 7 Days", true, []string{"coredumpctl", "list", "--no-pager", "--since", "-7d"}},
-	{"gnomeExtensions", "Enabled GNOME Extensions", false, []string{"gnome-extensions", "list", "--enabled"}},
-	{"flatpaks", "Installed Flatpak Apps", false, []string{"flatpak", "list", "--app", "--columns=application,version"}},
+	{"bootErrors", i18n.N("Errors From This Boot"), true, []string{"journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short", "--no-hostname"}},
+	{"crashes", i18n.N("Crashes in the Last 7 Days"), true, []string{"coredumpctl", "list", "--no-pager", "--since", "-7d"}},
+	{"gnomeExtensions", i18n.N("Enabled GNOME Extensions"), false, []string{"gnome-extensions", "list", "--enabled"}},
+	{"flatpaks", i18n.N("Installed Flatpak Apps"), false, []string{"flatpak", "list", "--app", "--columns=application,version"}},
 }
 
 // Collect runs only the sections whose keys are given. Call it off the main thread.
