@@ -129,6 +129,16 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 		r.SetTitle(t)
 		r.AddCssClass("property")
 		u.sysRows[i] = r
+		// A copy button on the right lets a user grab this fact (version, kernel, …)
+		// without selecting text; its target value is set from the subtitle on load.
+		copy := gtk.NewButtonFromIconName("edit-copy-symbolic")
+		copy.SetTooltipText(copyFactTooltip(t))
+		a11yLabel(&copy.Widget, copyFactTooltip(t))
+		copy.SetValign(gtk.AlignCenterValue)
+		copy.AddCssClass("flat")
+		copy.SetActionName("win.copy-fact")
+		u.sysCopyBtn[i] = copy
+		r.AddSuffix(&copy.Widget)
 		u.sysDetails.AddRow(&r.Widget)
 	}
 	sys.Add(&u.sysDetails.Widget)
@@ -217,44 +227,20 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	u.sysDetails.SetSubtitle(strings.TrimSpace(u.sum.Name + " " + u.sum.ImageVersion))
 	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState,
 		u.ident.Ref, u.ident.Tag, u.ident.Digest, u.ident.CPU, u.ident.GPU, u.ident.GNOME} {
-		if v == "" {
+		known := v != ""
+		if !known {
 			v = i18n.G("Unknown")
 		}
 		u.sysRows[i].SetSubtitle(v)
+		u.sysCopyBtn[i].SetVisible(known)
+		u.sysCopyBtn[i].SetActionTargetValue(glib.NewVariantString(v))
 	}
 
-	u.health.RemoveAll()
-	add := func(title, sub, icon string) {
-		r := adw.NewActionRow()
-		r.SetTitle(title)
-		r.SetSubtitle(sub)
-		r.AddPrefix(&gtk.NewImageFromIconName(icon).Widget)
-		u.health.Append(&r.Widget)
-	}
-	for _, f := range u.sum.FailedUnits {
-		add(f, i18n.G("Failed unit"), "dialog-error-symbolic")
-	}
-	for _, w := range u.sum.Unreachable {
-		add(w, i18n.G("Source unreachable"), "network-offline-symbolic")
-	}
-	for _, w := range u.sum.Warnings {
-		if !slices.Contains(u.sum.Unreachable, w) { // Unreachable is a subset of Warnings
-			add(w, i18n.G("Warning"), "dialog-warning-symbolic")
-		}
-	}
-	problem := len(u.sum.FailedUnits)+len(u.sum.Warnings) > 0
-	u.helpGroup.SetVisible(problem)
-	if !problem {
-		add(i18n.G("No problems found"), i18n.G("No failed units or warnings"), "object-select-symbolic")
-	}
+	u.syncHealth()
 
 	rows := make([]string, 0, len(s.System.Metrics)+len(s.User.Metrics))
 	row := func(prefix string, m snapshot.Metric) string {
-		name := prefix + m.Name
-		if m.Object != "" {
-			name += " [" + m.Object + "]"
-		}
-		return name + "\n" + m.String() // bind splits name / value onto two lines
+		return prefix + familyName(m) + "\n" + m.String() // bind splits name / value onto two lines
 	}
 	for _, m := range s.System.Metrics {
 		rows = append(rows, row("", m))
@@ -262,7 +248,8 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	for _, m := range s.User.Metrics {
 		rows = append(rows, row("user: ", m))
 	}
-	u.metrics.Splice(0, u.metrics.GetNItems(), rows)
+	u.metricRows = rows
+	u.metrics.Splice(0, u.metrics.GetNItems(), u.metricRows)
 	u.syncResults()
 	u.ovStack.SetVisibleChildName("ready")
 	u.syncReview()
@@ -323,7 +310,7 @@ func (u *ui) buildMetrics() {
 		box := row.GetFirstChild()
 		gtk.LabelNewFromInternalPtr(box.GetFirstChild().GoPointer()).SetText(name)
 		gtk.LabelNewFromInternalPtr(box.GetLastChild().GoPointer()).SetText(val)
-		box.SetTooltipText(name + " = " + val)
+		box.SetTooltipText(metricTooltip(name, val, u.families))
 		gtk.ButtonNewFromInternalPtr(row.GetLastChild().GoPointer()).SetActionTargetValue(glib.NewVariantString(val))
 	}))
 	lv := gtk.NewListView(gtk.NewNoSelection(model), &f.ListItemFactory)
@@ -371,7 +358,15 @@ func (u *ui) buildMetrics() {
 	box.Append(&results.Widget)
 	u.syncResults()
 	u.nav.Add(u.page(i18n.G("Metrics"), "metrics", nil, &box.Widget))
+	u.nav.ConnectPushed(hold(func(adw.NavigationView) {
+		if u.nav.GetVisiblePageTag() == "metrics" {
+			u.loadMetricDescriptions()
+		}
+	}))
 }
+
+// copyFactTooltip is the copy button's label for a system-detail field, e.g. "Copy Version".
+func copyFactTooltip(title string) string { return fmt.Sprintf(i18n.G("Copy %s"), title) }
 
 // emptyState picks the metrics status page text: an empty collection wins over
 // a non-matching query so a retained search never hides a failed collection.
@@ -380,6 +375,84 @@ func emptyState(total uint32, query string) (title, desc string) {
 		return i18n.G("No Results Found"), i18n.G("Try a different search or clear the filter")
 	}
 	return i18n.G("No Metrics Available"), i18n.G("Refresh the snapshot and check the Overview for collection warnings")
+}
+
+// syncHealth rebuilds the overview health list from the snapshot's failed units
+// and warnings. It runs after collection and again when the family descriptions
+// arrive, so a describe failure joins the other collector warnings.
+func (u *ui) syncHealth() {
+	u.health.RemoveAll()
+	add := func(title, sub, icon string) {
+		r := adw.NewActionRow()
+		r.SetTitle(title)
+		r.SetSubtitle(sub)
+		r.AddPrefix(&gtk.NewImageFromIconName(icon).Widget)
+		u.health.Append(&r.Widget)
+	}
+	for _, f := range u.sum.FailedUnits {
+		add(f, i18n.G("Failed unit"), "dialog-error-symbolic")
+	}
+	for _, w := range u.sum.Unreachable {
+		add(w, i18n.G("Source unreachable"), "network-offline-symbolic")
+	}
+	for _, w := range u.sum.Warnings {
+		if !slices.Contains(u.sum.Unreachable, w) { // Unreachable is a subset of Warnings
+			add(w, i18n.G("Warning"), "dialog-warning-symbolic")
+		}
+	}
+	problem := len(u.sum.FailedUnits)+len(u.sum.Warnings) > 0
+	u.helpGroup.SetVisible(problem)
+	if !problem {
+		add(i18n.G("No problems found"), i18n.G("No failed units or warnings"), "object-select-symbolic")
+	}
+}
+
+// loadMetricDescriptions fetches the family descriptions for both scopes the
+// first time the Metrics page is shown, without blocking the page. A describe
+// failure is surfaced as a warning alongside the collector warnings.
+func (u *ui) loadMetricDescriptions() {
+	if u.familiesReady {
+		return
+	}
+	u.familiesReady = true
+	go func() {
+		fams := map[string]snapshot.Family{}
+		var warns []string
+		for _, scope := range []snapshot.Scope{snapshot.System, snapshot.User} {
+			f, w, err := snapshot.Describe(context.Background(), snapshot.Run, scope)
+			warns = append(warns, w...)
+			if err != nil {
+				warns = append(warns, fmt.Sprintf("%s describe: %v", scope, err)) // call() only warns on non-cannot-start paths
+				continue
+			}
+			for name, fam := range f {
+				if _, seen := fams[name]; !seen { // system and user share family names
+					fams[name] = fam
+				}
+			}
+		}
+		post(func() {
+			u.families = fams  // descriptions are snapshot-independent; store before the nil check
+			if u.snap == nil { // a refresh replaced the snapshot while we were fetching
+				return
+			}
+			u.snap.Warnings = append(u.snap.Warnings, warns...)
+			u.sum = u.snap.Summary()
+			u.syncHealth()
+			u.reapplyMetrics()
+		})
+	}()
+}
+
+// reapplyMetrics re-runs the metrics bind so already-realised rows pick up the
+// family descriptions now that they are available, without rebuilding the list.
+// It runs once, the first time the Metrics page is shown, before the user has
+// scrolled, so the list need not preserve its offset.
+func (u *ui) reapplyMetrics() {
+	if u.metrics == nil || len(u.metricRows) == 0 {
+		return
+	}
+	u.metrics.Splice(0, u.metrics.GetNItems(), u.metricRows)
 }
 
 // troubleshoot hands the problem to ChairLift's Ask Bluefin flow, which owns the assistant's readiness and setup.

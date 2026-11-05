@@ -93,6 +93,7 @@ type ui struct {
 	spinner    *adw.Spinner
 	statusPage *adw.StatusPage
 	sysRows    [12]*adw.ActionRow
+	sysCopyBtn [12]*gtk.Button
 	ident      extras.Identity
 	health     *gtk.ListBox
 
@@ -101,6 +102,13 @@ type ui struct {
 	filter      *gtk.StringFilter
 	search      *gtk.SearchEntry
 	syncResults func() // filtered n-items notify misses 0→0 when the store empties under a query
+	// families holds family metadata from `systemd-report describe`, loaded lazily
+	// the first time the Metrics page is shown; metricRows are the current rows,
+	// refreshed once the descriptions arrive so already-realised rows pick up their
+	// tooltips without rebuilding the list.
+	families      map[string]snapshot.Family
+	metricRows    []string
+	familiesReady bool // describe has been requested at least once
 
 	// compose
 	mode        publish.Mode
@@ -133,6 +141,8 @@ type ui struct {
 	// review
 	payload       privacy.Payload
 	reportID      string
+	draftID       string // the Unfinished draft this Compose form was saved to or restored from
+	detachedDraft string // draftID before its discard, restored if the discard is undone
 	publishing    bool
 	issueText     *gtk.TextBuffer
 	settingText   bool
@@ -212,6 +222,7 @@ func (u *ui) activate() {
 	}
 	u.win.ConnectCloseRequest(hold(func(gtk.Window) bool {
 		u.toasts.DismissAll() // runs pending discards: closing is not an Undo
+		u.saveCompose(false)
 		if !u.dryRun {
 			saveWindowState(&u.win.Window)
 		}
@@ -248,6 +259,7 @@ func (u *ui) activate() {
 	action("close", func() { u.win.Close() })
 	action("drafts", func() { u.refreshDrafts(); u.nav.PushByTag("drafts") })
 	action("shortcuts", u.shortcuts)
+	action("save-draft", func() { u.saveCompose(true) })
 	action("help", func() {
 		log.Print("ui: opening docs")
 		gtk.NewUriLauncher("https://docs.projectbluefin.io").Launch(&u.win.Window, nil, nil, 0)
@@ -278,6 +290,12 @@ func (u *ui) activate() {
 		u.win.GetClipboard().SetText(value)
 		u.toast(i18n.G("Metric value copied"))
 	})
+	// System-detail rows on the front page carry the same copy affordance, so a
+	// user can grab the version or kernel to paste into a report or a forum post.
+	stringAction("copy-fact", func(value string) {
+		u.win.GetClipboard().SetText(value)
+		u.toast(i18n.G("Copied"))
+	})
 	stringAction("draft-resume", u.resume)
 	u.discardAct = stringAction("draft-discard", func(id string) {
 		if u.publishing {
@@ -290,6 +308,7 @@ func (u *ui) activate() {
 		t.ConnectButtonClicked(u.onUndo)
 		t.ConnectDismissed(u.onDismissed)
 		u.discarded[t.Ptr] = id
+		u.detachCompose(id)
 		log.Printf("ui: draft %s discarded, undo available", id)
 		u.refreshDrafts()
 		u.addToast(t)
@@ -308,6 +327,7 @@ func (u *ui) activate() {
 	u.app.SetAccelsForAction("win.close", []string{"<Control>w"})
 	u.app.SetAccelsForAction("win.shortcuts", []string{"<Control>question"})
 	u.app.SetAccelsForAction("win.help", []string{"F1"})
+	u.app.SetAccelsForAction("win.save-draft", []string{"<Control>s"})
 	u.app.SetAccelsForAction("win.advance", []string{"<Control>Return"})
 	u.app.SetAccelsForAction("app.quit", []string{"<Control>q"})
 
@@ -403,6 +423,7 @@ func (u *ui) shortcuts() {
 		{i18n.G("Search metrics"), "<Control>f"},
 		{i18n.G("Back"), "<Alt>Left Escape"},
 		{i18n.G("Continue to Review or Publish"), "<Control>Return"},
+		{i18n.G("Save report as a draft"), "<Control>s"},
 		{i18n.G("Keyboard shortcuts"), "<Control>question"},
 		{i18n.G("Help"), "F1"},
 		{i18n.G("Close window"), "<Control>w"},

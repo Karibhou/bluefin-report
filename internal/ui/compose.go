@@ -242,6 +242,7 @@ func (u *ui) openCompose(m publish.Mode) {
 
 // resetCompose empties the Compose form to its defaults.
 func (u *ui) resetCompose() {
+	u.draftID = ""
 	u.title.SetText("")
 	u.issueRef.SetText("")
 	u.desc.SetText("", -1)
@@ -466,7 +467,7 @@ func (u *ui) showReview(vals map[string]string) {
 }
 
 func (u *ui) markdown() string {
-	return issueMarkdown(u.mode, bufText(u.desc), bufText(u.steps), u.sum, u.ident, u.payload.Extras)
+	return issueMarkdown(u.mode, bufText(u.desc), bufText(u.steps), u.payload.Summary, u.ident, u.payload.Extras)
 }
 
 // issueMarkdown is the issue or comment text Review pre-fills, before the
