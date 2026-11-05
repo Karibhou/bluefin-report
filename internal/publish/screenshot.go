@@ -64,15 +64,16 @@ func screenshotData(p string) ([]byte, string, error) {
 
 func screenshotDestination(dir, name string, i int, previous []string) string {
 	dst := filepath.Join(dir, name)
-	if slices.Contains(previous, dst) {
-		dst = filepath.Join(dir, fmt.Sprintf("%d-%s", i, name))
+	for n := i; slices.Contains(previous, dst); n++ {
+		dst = filepath.Join(dir, fmt.Sprintf("%d-%s", n, name))
 	}
 	return dst
 }
 
 // copyScreenshots re-encodes the files into dir (0600) so no EXIF/text metadata survives
 // and a resume survives the originals moving. Undecodable files are rejected.
-func copyScreenshots(dir string, paths []string) ([]string, error) {
+// Copies never overwrite a path in previous.
+func copyScreenshots(dir string, paths, previous []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
@@ -85,7 +86,7 @@ func copyScreenshots(dir string, paths []string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		dst := screenshotDestination(dir, name, i, out)
+		dst := screenshotDestination(dir, name, i, append(slices.Clip(previous), out...))
 		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			return nil, err
 		}

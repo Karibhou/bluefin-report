@@ -28,12 +28,14 @@ const (
 	Update
 )
 
+// Draft is one report. An Unfinished draft keeps the description as typed in Body and the steps to reproduce in Steps.
 type Draft struct {
 	ReportID   string // set once when Review opens; Submit with a known ID resumes instead of re-creating
 	Mode       Mode
 	Repo       string
 	Title      string
 	Body       string
+	Steps      string `json:",omitempty"`
 	IssueRef   string
 	Attachment []byte
 	Queue      string
@@ -66,6 +68,7 @@ const (
 	ShotsPending   Stage = "ShotsPending"   // NewIssue: report done; screenshots comment not yet confirmed
 	CommentPending Stage = "CommentPending" // Confirm/Update: report attached; comment not yet confirmed
 	Uncertain      Stage = "Uncertain"
+	Unfinished     Stage = "Unfinished" // saved while writing; never published until the user reviews it again
 )
 
 // artifactName gives each addition to an existing issue its own report artifact.
@@ -97,6 +100,58 @@ var ErrNotSignedIn = errors.New("gh is not signed in; run `gh auth login`")
 
 // Repos are the image repos that accept reports. A machine reports only to the repo of the image it runs.
 var Repos = []string{"projectbluefin/dakota", "projectbluefin/utah"}
+
+// ErrUnfinished means a draft was saved before review, so it must be reopened and reviewed, not resumed.
+var ErrUnfinished = errors.New("this report was saved unfinished. Open it from Drafts to keep writing")
+
+// SaveUnfinished stores d as an Unfinished draft under d.ReportID, replacing an earlier save of
+// the same report, and returns the saved screenshot copies. It never touches GitHub and refuses
+// to overwrite a report that was reviewed.
+func SaveUnfinished(stateDir string, d Draft) ([]string, error) {
+	if d.ReportID == "" || strings.ContainsAny(d.ReportID, `/\.`) {
+		return nil, fmt.Errorf("bad report id %q", d.ReportID)
+	}
+	dir := filepath.Join(stateDir, d.ReportID)
+	s, err := load(filepath.Join(dir, "state.json"))
+	switch {
+	case err == nil && s.Stage != Unfinished:
+		return nil, fmt.Errorf("report %s is already being published", d.ReportID)
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return nil, err
+	}
+	shotDir := filepath.Join(dir, "screenshots")
+	var keep, fresh []string
+	for _, p := range d.Screenshots {
+		switch {
+		case filepath.Dir(p) != shotDir:
+			fresh = append(fresh, p)
+		case fileExists(p): // a missing copy means the draft was discarded meanwhile; drop it
+			keep = append(keep, p) // already a draft copy; do not lossy-encode it twice
+		}
+	}
+	if err := checkScreenshots(fresh); err != nil {
+		return nil, err
+	}
+	copies, err := copyScreenshots(shotDir, fresh, keep)
+	if err != nil {
+		return nil, err
+	}
+	d.Screenshots = append(keep, copies...)
+	d.Attachment = nil
+	started := time.Now().UTC()
+	if s != nil {
+		started = s.StartedAt
+	}
+	if err := save(stateDir, &Saved{ReportID: d.ReportID, Stage: Unfinished, Draft: d, StartedAt: started}); err != nil {
+		return nil, err
+	}
+	return d.Screenshots, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
 
 // Discard deletes a local draft; it never touches GitHub.
 func Discard(stateDir, reportID string) error {
@@ -224,7 +279,7 @@ func Submit(ctx context.Context, gh Exec, stateDir string, d Draft) (Result, err
 			return Result{}, fmt.Errorf("issue #%s was opened by %s, but %s is signed in. Only the original reporter can add an update; use Confirm Existing Issue instead", d.IssueRef, author, account)
 		}
 	}
-	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots)
+	shots, err := copyScreenshots(filepath.Join(stateDir, d.ReportID, "screenshots"), d.Screenshots, nil)
 	if err != nil {
 		return Result{}, err
 	}
@@ -244,6 +299,9 @@ func Resume(ctx context.Context, gh Exec, stateDir, reportID string) (Result, er
 	s, err := load(filepath.Join(stateDir, reportID, "state.json"))
 	if err != nil {
 		return Result{}, err
+	}
+	if s.Stage == Unfinished {
+		return Result{}, ErrUnfinished
 	}
 	if !slices.Contains(Repos, s.Draft.Repo) { // drafts saved under older routing
 		return Result{}, fmt.Errorf("refusing to publish to %q: not an image repo that accepts reports", s.Draft.Repo)
