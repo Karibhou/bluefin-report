@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/projectbluefin/bluefin-report/internal/i18n"
 )
 
 // Identity is shown in the Overview and the issue summary table.
@@ -131,6 +133,7 @@ func gpus() string {
 }
 
 // Section is one opt-in block. Details marks those also shown, collapsed, in the issue body.
+// Title is English, as the issue body needs; the UI shows it through i18n.G.
 type Section struct {
 	Key, Title string
 	Details    bool
@@ -167,27 +170,27 @@ func warnings(n string, match ...string) part {
 }
 
 var Sections = []Section{
-	{"bootErrors", "Errors From This Boot", true, sh("journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short", "--no-hostname").get},
-	{"crashes", "Crashes in the Last 7 Days", true, sh("coredumpctl", "list", "--no-pager", "--since", "-7d").get},
+	{"bootErrors", i18n.N("Errors From This Boot"), true, sh("journalctl", "-b0", "-p", "err", "--no-pager", "-n", "40", "-o", "short", "--no-hostname").get},
+	{"crashes", i18n.N("Crashes in the Last 7 Days"), true, sh("coredumpctl", "list", "--no-pager", "--since", "-7d").get},
 	// No -n: with --grep it makes journalctl print newest-first. One boot's kernel
 	// log is small, and run keeps only the newest 64 KiB anyway.
-	{"previousBoot", "Kernel Problems in the Previous Boot", false, sh("journalctl", "-b", "-1", "-k", "--no-pager", "-o", "short", "--no-hostname",
+	{"previousBoot", i18n.N("Kernel Problems in the Previous Boot"), false, sh("journalctl", "-b", "-1", "-k", "--no-pager", "-o", "short", "--no-hostname",
 		"--case-sensitive=false", "--grep", "panic|oops|bug:|call trace|suspend|hibernate|resume|hung task|lockup").get},
-	{"desktopLog", "Desktop Warnings", false, warnings("200", "_SYSTEMD_UNIT=gdm.service", "+", "_COMM=gnome-shell").get},
-	{"updateLog", "Update and Boot Warnings", false, warnings("250", "-u", "bootc-fetch-apply-updates.service", "-u", "rpm-ostreed.service", "-u", "systemd-boot-update.service").get},
-	{"networkLog", "Network Warnings and Device State", false, join(
+	{"desktopLog", i18n.N("Desktop Warnings"), false, warnings("200", "_SYSTEMD_UNIT=gdm.service", "+", "_COMM=gnome-shell").get},
+	{"updateLog", i18n.N("Update and Boot Warnings"), false, warnings("250", "-u", "bootc-fetch-apply-updates.service", "-u", "rpm-ostreed.service", "-u", "systemd-boot-update.service").get},
+	{"networkLog", i18n.N("Network Warnings and Device State"), false, join(
 		warnings("250", "-u", "NetworkManager.service"),           // quoted connection names: removed by privacy
 		sh("nmcli", "-t", "-f", "TYPE,STATE", "device", "status"), // no DEVICE/CONNECTION: interface and SSID names identify networks
 	)},
 	// Portals run as user units; the glob also catches backends (-gnome, -gtk).
-	{"portalLog", "Flatpak and Portal Warnings", false, warnings("250", "-u", "flatpak-system-helper.service", "--user-unit", "xdg-desktop-portal*").get},
-	{"hardware", "Disks and Graphics", false, join(
+	{"portalLog", i18n.N("Flatpak and Portal Warnings"), false, warnings("250", "-u", "flatpak-system-helper.service", "--user-unit", "xdg-desktop-portal*").get},
+	{"hardware", i18n.N("Disks and Graphics"), false, join(
 		sh("lsblk", "-d", "-e", "7,11", "-o", "KNAME,SIZE,ROTA,TRAN,MODEL"), // KNAME: mapper aliases can be WWIDs; never SERIAL/WWN
 		sh("nvidia-smi", "--query-gpu=name,driver_version,pstate,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw", "--format=csv"),
 		part{"# amdgpu: /sys/class/drm/card*/device", func(context.Context) string { return amdgpus() }},
 	)},
-	{"gnomeExtensions", "Enabled GNOME Extensions", false, sh("gnome-extensions", "list", "--enabled").get},
-	{"flatpaks", "Installed Flatpak Apps", false, sh("flatpak", "list", "--app", "--columns=application,version").get},
+	{"gnomeExtensions", i18n.N("Enabled GNOME Extensions"), false, sh("gnome-extensions", "list", "--enabled").get},
+	{"flatpaks", i18n.N("Installed Flatpak Apps"), false, sh("flatpak", "list", "--app", "--columns=application,version").get},
 }
 
 func num(p string) (float64, bool) {

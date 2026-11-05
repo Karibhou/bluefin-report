@@ -111,6 +111,8 @@ make lint           # gofmt + go vet + go mod tidy -diff
 make validate-data  # desktop-file-validate (+ appstreamcli if present)
 make screenshots    # capture the running app locally; requires Xvfb/AT-SPI
 make bump           # tag the next release, YY.MM.N (does not push)
+make pot            # po/bluefin-report.pot translation template; needs GNU gettext ≥ 0.25
+make mo data        # compile po/*.po; merge them into the desktop file and metainfo
 ```
 
 Releases use calendar versions `YY.MM.N`, not a release for every commit.
@@ -120,5 +122,16 @@ run manually in dry-run mode. `bluefin-report --version` prints the running vers
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for release controls, screenshot runtime
 requirements, and the README-refresh bot's permissions.
+
+### Translations
+
+The app uses GNU gettext. Wrap user-visible text in `i18n.G` (or `i18n.NG` for
+counts, `i18n.N` to mark text translated later) and list the file in
+`po/POTFILES`; text sent to GitHub stays in English. To add a language, run
+`make pot`, create `po/<lang>.po` from the template (for example with
+`msginit -l <lang> -i po/bluefin-report.pot -o po/<lang>.po`), and add `<lang>`
+to `po/LINGUAS`. Releases ship the compiled catalogs in `locale/` next to the
+binary; to try one locally, run `make build mo` and start
+`LANGUAGE=<lang> ./build/bluefin-report --dry-run`.
 
 Licensed under Apache-2.0.

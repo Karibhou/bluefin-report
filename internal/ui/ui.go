@@ -24,6 +24,7 @@ import (
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 
 	"github.com/projectbluefin/bluefin-report/internal/extras"
+	"github.com/projectbluefin/bluefin-report/internal/i18n"
 	"github.com/projectbluefin/bluefin-report/internal/privacy"
 	"github.com/projectbluefin/bluefin-report/internal/publish"
 	"github.com/projectbluefin/bluefin-report/internal/snapshot"
@@ -31,8 +32,9 @@ import (
 
 const appID = "io.projectbluefin.Report"
 
-// appName is the user-visible name; data/*.desktop and metainfo repeat it.
-const appName = "Report a Problem"
+// appName is the user-visible name, in English; data/*.desktop and metainfo
+// repeat it. Show it through i18n.G.
+var appName = i18n.N("Report a Problem")
 
 // appIcon is the icon name used by the About dialog; data/*.desktop Icon= must match (checked by a test).
 const appIcon = "io.projectbluefin.Report"
@@ -185,6 +187,7 @@ func hold[T any](f T) *T { p := &f; keep = append(keep, p); return p }
 
 // Run starts the GTK application and returns its exit code.
 func Run(dryRun bool) int {
+	i18n.Init(i18n.Dir())
 	u := &ui{dryRun: dryRun}
 	u.app = adw.NewApplication(appID, gio.GApplicationNonUniqueValue)
 	u.app.ConnectActivate(hold(func(gio.Application) { u.activate() }))
@@ -225,7 +228,7 @@ func (u *ui) activate() {
 		}
 		return false
 	}))
-	u.win.SetTitle(appName)
+	u.win.SetTitle(i18n.G(appName))
 
 	u.nav = adw.NewNavigationView()
 	u.nav.Add(u.buildOverview())
@@ -285,22 +288,22 @@ func (u *ui) activate() {
 	}
 	stringAction("copy-metric", func(value string) {
 		u.win.GetClipboard().SetText(value)
-		u.toast("Metric value copied")
+		u.toast(i18n.G("Metric value copied"))
 	})
 	// System-detail rows on the front page carry the same copy affordance, so a
 	// user can grab the version or kernel to paste into a report or a forum post.
 	stringAction("copy-fact", func(value string) {
 		u.win.GetClipboard().SetText(value)
-		u.toast("Copied")
+		u.toast(i18n.G("Copied"))
 	})
 	stringAction("draft-resume", u.resume)
 	u.discardAct = stringAction("draft-discard", func(id string) {
 		if u.publishing {
-			u.toast("Wait for publishing to finish")
+			u.toast(i18n.G("Wait for publishing to finish"))
 			return
 		}
-		t := adw.NewToast("Report discarded")
-		t.SetButtonLabel("_Undo")
+		t := adw.NewToast(i18n.G("Report discarded"))
+		t.SetButtonLabel(i18n.G("_Undo"))
 		t.SetTimeout(0) // stays until Undo, close or the next toast: 5 s is too short to reach by keyboard
 		t.ConnectButtonClicked(u.onUndo)
 		t.ConnectDismissed(u.onDismissed)
@@ -341,7 +344,7 @@ func (u *ui) showError(heading, body string) {
 		body = string(unicode.ToUpper(r)) + body[n:]
 	}
 	a := adw.NewAlertDialog(heading, body)
-	a.AddResponse("close", "_Close")
+	a.AddResponse("close", i18n.G("_Close"))
 	a.SetDefaultResponse("close")
 	a.Present(&u.win.Widget)
 }
@@ -365,7 +368,7 @@ func (u *ui) toolbar(header *adw.HeaderBar, content *gtk.Widget) *adw.ToolbarVie
 	}
 	tv.AddTopBar(&header.Widget)
 	if u.dryRun {
-		b := adw.NewBanner("Dry run: nothing will be published")
+		b := adw.NewBanner(i18n.G("Dry run: nothing will be published"))
 		b.SetRevealed(true)
 		tv.AddTopBar(&b.Widget)
 	}
@@ -416,15 +419,15 @@ func pill(label string, cb func()) *gtk.Button {
 func (u *ui) shortcuts() {
 	s := adw.NewShortcutsSection("")
 	for _, kv := range [][2]string{
-		{"Refresh snapshot", "<Control>r F5"},
-		{"Search metrics", "<Control>f"},
-		{"Back", "<Alt>Left Escape"},
-		{"Continue to Review or Publish", "<Control>Return"},
-		{"Save report as a draft", "<Control>s"},
-		{"Keyboard shortcuts", "<Control>question"},
-		{"Help", "F1"},
-		{"Close window", "<Control>w"},
-		{"Quit", "<Control>q"},
+		{i18n.G("Refresh snapshot"), "<Control>r F5"},
+		{i18n.G("Search metrics"), "<Control>f"},
+		{i18n.G("Back"), "<Alt>Left Escape"},
+		{i18n.G("Continue to Review or Publish"), "<Control>Return"},
+		{i18n.G("Save report as a draft"), "<Control>s"},
+		{i18n.G("Keyboard shortcuts"), "<Control>question"},
+		{i18n.G("Help"), "F1"},
+		{i18n.G("Close window"), "<Control>w"},
+		{i18n.G("Quit"), "<Control>q"},
 	} {
 		s.Add(adw.NewShortcutsItem(kv[0], kv[1]))
 	}
@@ -504,7 +507,7 @@ func fakeGHStream(_ context.Context, _ []byte, onLine func(string), args ...stri
 
 func (u *ui) about() {
 	a := adw.NewAboutDialog()
-	a.SetApplicationName(appName)
+	a.SetApplicationName(i18n.G(appName))
 	a.SetApplicationIcon(appIcon)
 	a.SetDeveloperName("Project Bluefin")
 	a.SetVersion(Version)
