@@ -41,6 +41,9 @@ type Payload struct {
 	Removed map[string]int    // rule → number of values removed or rewritten
 	Omitted []string          // families dropped to fit the budget
 	Extras  map[string]string // Options.Extras after redaction, for the issue body
+	// Summary is the snapshot summary with its unit names and warnings redacted, for the
+	// issue body. Unit names carry identities too (var-home-<user>-….mount, sshd@…-<ip>:<port>.service).
+	Summary snapshot.Summary
 }
 
 type document struct {
@@ -73,11 +76,12 @@ var droppedPrefix = []string{
 }
 
 var (
-	reMAC   = regexp.MustCompile(`(?i)\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b`)
-	reIPish = regexp.MustCompile(`[0-9A-Fa-f.:]*[.:][0-9A-Fa-f.:]*`)
-	reEmail = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
-	reHome  = regexp.MustCompile(`(?:/var)?/home/[^/\s"]+`)
-	reUnit  = regexp.MustCompile(`\.(service|socket|target|mount|automount|swap|timer|path|slice|scope|device)$`)
+	reMAC    = regexp.MustCompile(`(?i)\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b`)
+	reIPish  = regexp.MustCompile(`[0-9A-Fa-f.:]*[.:][0-9A-Fa-f.:]*`)
+	reEmail  = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+	reHome   = regexp.MustCompile(`(?:/var)?/home/[^/\s"]+`)
+	reQuoted = regexp.MustCompile(`'[^'\n]*'`)
+	reUnit   = regexp.MustCompile(`\.(service|socket|target|mount|automount|swap|timer|path|slice|scope|device)$`)
 )
 
 var hostname = os.Hostname
@@ -141,9 +145,21 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 	if len(opt.Extras) > 0 {
 		doc.Extras = map[string]string{}
 		for k, v := range opt.Extras {
-			doc.Extras[k] = r.text(v)
+			switch k {
+			case "networkLog": // NetworkManager quotes connection names and SSIDs
+				doc.Extras[k] = r.text(r.replace(reQuoted, v, "connection name", "'[name]'"))
+			case "gnomeExtensions": // UUIDs like dash-to-dock@micxgx.gmail.com name public extensions
+				doc.Extras[k] = r.scrub(v, false)
+			default:
+				doc.Extras[k] = r.text(v)
+			}
 		}
 	}
+	// The issue body lists failed units from both scopes whether or not the user report is attached.
+	scrubbed := s
+	scrubbed.Warnings = r.texts(s.Warnings)
+	sum := scrubbed.Summary() // derives Unreachable from the scrubbed warnings
+	sum.FailedUnits = r.texts(sum.FailedUnits)
 
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -163,7 +179,7 @@ func Build(s snapshot.Snapshot, opt Options) (Payload, error) {
 			return Payload{}, err
 		}
 	}
-	return Payload{JSON: out, Removed: r.removed, Omitted: doc.OmittedFamilies, Extras: doc.Extras}, nil
+	return Payload{JSON: out, Removed: r.removed, Omitted: doc.OmittedFamilies, Extras: doc.Extras, Summary: sum}, nil
 }
 
 type redactor struct {
@@ -271,17 +287,21 @@ func dropped(name string) bool {
 	return false
 }
 
-func (r *redactor) text(s string) string {
+func (r *redactor) text(s string) string { return r.scrub(s, true) }
+
+func (r *redactor) scrub(s string, emails bool) string {
 	if s == "" {
 		return s
 	}
-	s = reEmail.ReplaceAllStringFunc(s, func(tok string) string {
-		if reUnit.MatchString(tok) { // getty@tty1.service is a template unit, not an address
-			return tok
-		}
-		r.removed["email"]++
-		return "[email]"
-	})
+	if emails {
+		s = reEmail.ReplaceAllStringFunc(s, func(tok string) string {
+			if reUnit.MatchString(tok) { // getty@tty1.service is a template unit, not an address
+				return tok
+			}
+			r.removed["email"]++
+			return "[email]"
+		})
+	}
 	s = r.replace(reHome, s, "home path", "~")
 	s = r.replace(reMAC, s, "MAC address", "[mac]") // before IPv6: a MAC also parses as hex groups
 	s = r.addresses(s)
@@ -289,6 +309,18 @@ func (r *redactor) text(s string) string {
 		s = r.replace(re, s, r.names[i], "["+r.names[i]+"]")
 	}
 	return s
+}
+
+// texts scrubs a copy of each string, leaving the input slice untouched.
+func (r *redactor) texts(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = r.text(v)
+	}
+	return out
 }
 
 func (r *redactor) addresses(s string) string {

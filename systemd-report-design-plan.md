@@ -144,7 +144,7 @@ Rules:
 | Resources | `io.systemd.CGroup` | CGroup |
 | Logs | `io.systemd.Journal` | Journal (often permission-denied for users) |
 
-Beta 1's "Sleep/Crash", "Bootc/Update" and "Flatpak" profiles are **removed**: no source on this host provides that data. Add them when a source exists, not before. A profile whose sources are missing is shown disabled with the reason; it is never shown as "nothing found".
+Beta 1's "Sleep/Crash", "Bootc/Update" and "Flatpak" profiles are **removed** as systemd-report profiles: no source on this host provides that data (`io.systemd.Journal` stays unreachable, its socket is `root:systemd-journal`). They are covered instead by unprivileged opt-in sections in `internal/extras` (Kernel Problems in the Previous Boot, Desktop Warnings, Update and Boot Warnings, Network Warnings and Device State, Flatpak and Portal Warnings, Disks and Graphics) that run `journalctl` directly, since the system journal is readable through the wheel/adm ACL on `/var/log/journal`. Still no root, no polkit (§1). A profile whose sources are missing is shown disabled with the reason; it is never shown as "nothing found".
 
 ## 6. Privacy
 
@@ -267,16 +267,16 @@ Bonedigger and `ujust report` are unchanged.
 
 ## 12. Scope against the original inspector prompt
 
-The project began from a [prompt](https://pastebin.com/raw/CyAf24V1) for a "systemd Inspector & Trust Center": a four-view `AdwNavigationSplitView` app with live telemetry, signing, fleet upload and admin tools. This plan deliberately builds a different product, the support-report journey of §3. A capability missing below is a scope choice, not a bug in the support-report flow; a focused audit fix does not imply building the inspector. Decided in [#14](https://github.com/projectbluefin/bluefin-report/issues/14); each Follow-up row has its own issue.
+The project began from a [prompt](https://pastebin.com/raw/CyAf24V1) for a "systemd Inspector & Trust Center": a four-view `AdwNavigationSplitView` app with live telemetry, signing, fleet upload and admin tools. This plan deliberately builds a different product, the support-report journey of §3. A capability missing below is a scope choice, not a bug in the support-report flow; a focused audit fix does not imply building the inspector. Decided in [#14](https://github.com/projectbluefin/bluefin-report/issues/14); the previously identified follow-ups are tracked in the linked issues.
 
 Status: **Kept** = shipped, possibly reshaped. **Follow-up** = belongs to the current design, tracked in the linked issue. **Deferred** = roadmap, revisit when the stated condition holds. **Rejected** = out of scope for this product.
 
 | Prompt capability | Status | Where it stands |
 | :--- | :--- | :--- |
 | Static facts (OS, kernel, arch, image, CPU, GPU) | Kept | Overview "This System" group. The prompt's hostname, machine/boot ID and SMBIOS serials are not shown and are dropped from the attachment (§6). |
-| Per-fact Copy button, export | Follow-up | Metric values copy and the reviewed report exports (Journey C); copy on Overview fact rows: [#65](https://github.com/projectbluefin/bluefin-report/issues/65). |
+| Per-fact Copy button, export | Kept | Metric values and Overview fact rows copy ([#65](https://github.com/projectbluefin/bluefin-report/issues/65), #74); the reviewed report exports (Journey C). |
 | Raw metric browsing | Kept | Metrics page, both scopes, user rows prefixed `user:`. |
-| `describe` metadata in tooltips | Follow-up | `snapshot.Describe` parses it; no UI caller yet. Tooltips show only name and value: [#64](https://github.com/projectbluefin/bluefin-report/issues/64). |
+| `describe` metadata in tooltips | Kept | `snapshot.Describe` parses it; `ui.metricTooltip` shows it on hover over each metrics row ([#64](https://github.com/projectbluefin/bluefin-report/issues/64); internal/ui/metrics.go). |
 | System/user scope toggle | Deferred | Both scopes are always collected (§5). A Metrics-page scope filter is a refinement, not a requirement. |
 | Dot-boundary match filtering | Deferred | `snapshot.Take` forwards matches; the UI filters by case-insensitive substring over rendered rows, which also finds values. |
 | Inspect and save the compiled JSON report | Kept | Review "Attachment" tab shows the scrubbed `generate` object; Export Report… saves it (§4, §6). |
@@ -287,5 +287,5 @@ Status: **Kept** = shipped, possibly reshaped. **Follow-up** = belongs to the cu
 | HTTPS/mTLS upload profiles (`--url`, `--cert`, `--key`, `--trust`) | Deferred | §1 non-goal for end users (fleet use, needs client certs). Possible later. |
 | `report.files` manager with Polkit | Rejected | §1: no root, no polkit policy. `io.systemd.Files.*` stays opt-in per entry (§6). |
 | Periodic reporting `.timer` control | Rejected | Enabling a system timer needs privilege (§1: no root) and serves fleets, not a user filing one bug. |
-| Companion tools: `systemd-analyze security`/`plot`/`blame`, `systemd-pcrlock`/`systemd-measure`, `systemd-cgtop`, `varlinkctl` | Rejected | Inspector features, not reporting. A single read-only diagnostic may still be proposed, in its own issue, as one more opt-in report extra (existing ones: boot errors, crashes, GNOME extensions, Flatpaks; see `internal/extras`). |
+| Companion tools: `systemd-analyze security`/`plot`/`blame`, `systemd-pcrlock`/`systemd-measure`, `systemd-cgtop`, `varlinkctl` | Rejected | Inspector features, not reporting. A single read-only diagnostic may still be proposed, in its own issue, as one more opt-in report extra (existing ones: boot errors, crashes, previous-boot kernel problems, desktop/update/network/portal warnings, disks and graphics, GNOME extensions, Flatpaks; see `internal/extras`). |
 | Four-view `AdwNavigationSplitView` | Rejected | §4: replaced by the `AdwNavigationView` journey. |
