@@ -124,6 +124,16 @@ func (u *ui) buildOverview() *adw.NavigationPage {
 		r.SetTitle(t)
 		r.AddCssClass("property")
 		u.sysRows[i] = r
+		// A copy button on the right lets a user grab this fact (version, kernel, …)
+		// without selecting text; its target value is set from the subtitle on load.
+		copy := gtk.NewButtonFromIconName("edit-copy-symbolic")
+		copy.SetTooltipText(copyFactTooltip(t))
+		a11yLabel(&copy.Widget, copyFactTooltip(t))
+		copy.SetValign(gtk.AlignCenterValue)
+		copy.AddCssClass("flat")
+		copy.SetActionName("win.copy-fact")
+		u.sysCopyBtn[i] = copy
+		r.AddSuffix(&copy.Widget)
 		u.sysDetails.AddRow(&r.Widget)
 	}
 	sys.Add(&u.sysDetails.Widget)
@@ -210,10 +220,13 @@ func (u *ui) loaded(s snapshot.Snapshot, err error) {
 	u.sysDetails.SetSubtitle(strings.TrimSpace(u.sum.Name + " " + u.sum.ImageVersion))
 	for i, v := range []string{u.sum.Name, u.sum.ImageVersion, u.sum.ImageID, u.sum.Kernel, u.sum.Arch, u.sum.SystemState,
 		u.ident.Ref, u.ident.Tag, u.ident.Digest, u.ident.CPU, u.ident.GPU, u.ident.GNOME} {
-		if v == "" {
+		known := v != ""
+		if !known {
 			v = "Unknown"
 		}
 		u.sysRows[i].SetSubtitle(v)
+		u.sysCopyBtn[i].SetVisible(known)
+		u.sysCopyBtn[i].SetActionTargetValue(glib.NewVariantString(v))
 	}
 
 	u.health.RemoveAll()
@@ -368,6 +381,9 @@ func (u *ui) buildMetrics() {
 	u.syncResults()
 	u.nav.Add(u.page("Metrics", "metrics", nil, &box.Widget))
 }
+
+// copyFactTooltip is the copy button's label for a system-detail field, e.g. "Copy Version".
+func copyFactTooltip(title string) string { return "Copy " + title }
 
 // emptyState picks the metrics status page text: an empty collection wins over
 // a non-matching query so a retained search never hides a failed collection.
